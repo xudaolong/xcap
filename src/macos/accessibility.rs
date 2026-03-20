@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
-    hash::{Hash, Hasher},
     ptr::{self, NonNull},
 };
 
@@ -132,6 +131,7 @@ pub(super) fn application(pid: u32) -> Option<AccessibilityApp> {
 pub(super) fn descendant_records_for_window(
     root: &WindowInfo,
     app: &AccessibilityApp,
+    next_id: &mut u32,
 ) -> Vec<WindowInfoRecord> {
     let Some(window) = match_window(root, app) else {
         return Vec::new();
@@ -150,6 +150,7 @@ pub(super) fn descendant_records_for_window(
         0,
         &mut visited,
         &mut visited_count,
+        next_id,
         &mut records,
     );
 
@@ -274,6 +275,7 @@ fn collect_descendant_records(
     depth: usize,
     visited: &mut HashSet<usize>,
     visited_count: &mut usize,
+    next_id: &mut u32,
     records: &mut Vec<WindowInfoRecord>,
 ) {
     if depth >= MAX_AX_DEPTH || *visited_count >= MAX_AX_NODES_PER_WINDOW {
@@ -295,6 +297,7 @@ fn collect_descendant_records(
 
         let Some(info) = build_ax_info(
             &child,
+            next_id,
             pid,
             app_name,
             sibling_count - index as i32 - 1,
@@ -319,6 +322,7 @@ fn collect_descendant_records(
             depth + 1,
             visited,
             visited_count,
+            next_id,
             records,
         );
     }
@@ -384,6 +388,7 @@ fn collect_debug_descendant_lines(
 
 fn build_ax_info(
     element: &AXUIElement,
+    next_id: &mut u32,
     pid: u32,
     app_name: &str,
     z: i32,
@@ -406,7 +411,7 @@ fn build_ax_info(
         || ax_bool_attribute(element, "AXFocused").unwrap_or(false);
 
     Some(WindowInfo {
-        id: synthetic_element_id(element, pid),
+        id: next_synthetic_id(next_id),
         pid,
         app_name: app_name.to_string(),
         title,
@@ -549,15 +554,14 @@ fn ax_array_attribute_elements(
     elements
 }
 
-fn element_ptr_key(element: &AXUIElement) -> usize {
+pub(super) fn element_ptr_key(element: &AXUIElement) -> usize {
     element as *const AXUIElement as usize
 }
 
-fn synthetic_element_id(element: &AXUIElement, pid: u32) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    pid.hash(&mut hasher);
-    element_ptr_key(element).hash(&mut hasher);
-    ((hasher.finish() as u32) | 0x8000_0000).max(1)
+fn next_synthetic_id(next_id: &mut u32) -> u32 {
+    let id = *next_id;
+    *next_id = next_id.saturating_add(1);
+    id
 }
 
 pub(super) fn accessibility_cache_for(
@@ -686,5 +690,15 @@ mod tests {
     fn test_ax_node_limit_is_positive() {
         assert!(MAX_AX_NODES_PER_WINDOW > 0);
         assert!(MAX_AX_NODES_PER_WINDOW >= MAX_AX_CHILDREN_PER_NODE);
+    }
+
+    #[test]
+    fn test_next_synthetic_id_is_unique() {
+        let mut next_id = 0x8000_0000;
+        let first = next_synthetic_id(&mut next_id);
+        let second = next_synthetic_id(&mut next_id);
+
+        assert_ne!(first, second);
+        assert_eq!(second, first + 1);
     }
 }

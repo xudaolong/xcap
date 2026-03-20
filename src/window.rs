@@ -193,8 +193,14 @@ pub(crate) fn build_window_info_tree(
         info_by_id: &HashMap<u32, WindowInfo>,
         child_ids_by_parent: &HashMap<u32, Vec<u32>>,
         options: &WindowQueryOptions,
+        visiting: &mut std::collections::HashSet<u32>,
     ) -> Vec<WindowInfo> {
+        if !visiting.insert(id) {
+            return Vec::new();
+        }
+
         let Some(mut node) = info_by_id.get(&id).cloned() else {
+            visiting.remove(&id);
             return Vec::new();
         };
 
@@ -202,7 +208,15 @@ pub(crate) fn build_window_info_tree(
             .get(&id)
             .into_iter()
             .flatten()
-            .flat_map(|child_id| build_node(*child_id, info_by_id, child_ids_by_parent, options))
+            .flat_map(|child_id| {
+                build_node(
+                    *child_id,
+                    info_by_id,
+                    child_ids_by_parent,
+                    options,
+                    visiting,
+                )
+            })
             .collect::<Vec<_>>();
 
         if options.include_children {
@@ -216,18 +230,30 @@ pub(crate) fn build_window_info_tree(
             .as_ref()
             .is_none_or(|filter| filter.matches(node.width, node.height));
 
-        if matches {
+        let result = if matches {
             vec![node]
         } else if options.include_children {
             promoted_children
         } else {
             Vec::new()
-        }
+        };
+
+        visiting.remove(&id);
+        result
     }
 
     root_ids
         .into_iter()
-        .flat_map(|id| build_node(id, &info_by_id, &child_ids_by_parent, options))
+        .flat_map(|id| {
+            let mut visiting = std::collections::HashSet::new();
+            build_node(
+                id,
+                &info_by_id,
+                &child_ids_by_parent,
+                options,
+                &mut visiting,
+            )
+        })
         .collect()
 }
 
@@ -375,5 +401,34 @@ mod tests {
         assert_eq!(result[0].id, 2);
         assert_eq!(result[0].children.len(), 1);
         assert_eq!(result[0].children[0].id, 3);
+    }
+
+    #[test]
+    fn test_build_window_info_tree_skips_cycles() {
+        let records = vec![
+            WindowInfoRecord {
+                info: window_info(1, 600, 400),
+                parent_id: Some(2),
+            },
+            WindowInfoRecord {
+                info: window_info(2, 500, 300),
+                parent_id: Some(1),
+            },
+            WindowInfoRecord {
+                info: window_info(3, 700, 500),
+                parent_id: None,
+            },
+        ];
+
+        let result = build_window_info_tree(
+            records,
+            &WindowQueryOptions {
+                include_children: true,
+                size_filter: None,
+            },
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 3);
     }
 }

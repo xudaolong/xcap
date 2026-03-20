@@ -264,10 +264,21 @@ impl ImplWindow {
 
         if options.include_children {
             let accessibility_cache = accessibility::accessibility_cache_for(&snapshots);
+            let mut next_id = snapshots
+                .iter()
+                .map(|info| info.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+                .max(0x8000_0000);
 
             for snapshot in &snapshots {
                 if let Some(Some(app)) = accessibility_cache.get(&snapshot.pid) {
-                    records.extend(accessibility::descendant_records_for_window(snapshot, app));
+                    records.extend(accessibility::descendant_records_for_window(
+                        snapshot,
+                        app,
+                        &mut next_id,
+                    ));
                 }
             }
         }
