@@ -255,6 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 -   `is_minimized`、`is_maximized`、`is_focused`
 -   `children`，用于表示嵌套的子窗口结构
 
+如果想排查 macOS 下为什么 `children` 仍然为空，可以运行：
+
+```sh
+XCAP_WINDOW_QUERY_DEBUG=1 cargo run --example window_query
+```
+
 更多例子可以在 [examples](./examples) 目录中找到。
 
 ## Linux 系统要求

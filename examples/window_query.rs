@@ -1,3 +1,5 @@
+use std::env;
+
 use xcap::{Window, WindowInfo, WindowQueryOptions, WindowSizeFilter};
 
 fn print_window_tree(windows: &[WindowInfo], depth: usize) {
@@ -23,7 +25,7 @@ fn print_window_tree(windows: &[WindowInfo], depth: usize) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let windows = Window::query(WindowQueryOptions {
+    let options = WindowQueryOptions {
         include_children: true,
         size_filter: Some(WindowSizeFilter {
             min_width: Some(300),
@@ -31,9 +33,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_height: Some(200),
             max_height: None,
         }),
-    })?;
+    };
+
+    let windows = Window::query(options.clone())?;
 
     print_window_tree(&windows, 0);
+
+    #[cfg(target_os = "macos")]
+    if env::var_os("XCAP_WINDOW_QUERY_DEBUG").is_some() {
+        println!("\n== macOS accessibility debug ==");
+        for line in Window::debug_macos_accessibility(options)? {
+            println!("{line}");
+        }
+    }
 
     Ok(())
 }

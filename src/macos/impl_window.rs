@@ -18,7 +18,7 @@ use crate::{
     window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
 };
 
-use super::{capture::capture, impl_monitor::ImplMonitor};
+use super::{accessibility, capture::capture, impl_monitor::ImplMonitor};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImplWindow {
@@ -169,18 +169,6 @@ fn get_active_app_pid() -> Option<u32> {
         .map(|pid| pid.intValue() as u32)
 }
 
-fn contains_window(outer: &WindowInfo, inner: &WindowInfo) -> bool {
-    let outer_right = outer.x + outer.width as i32;
-    let outer_bottom = outer.y + outer.height as i32;
-    let inner_right = inner.x + inner.width as i32;
-    let inner_bottom = inner.y + inner.height as i32;
-
-    outer.x <= inner.x
-        && outer.y <= inner.y
-        && outer_right >= inner_right
-        && outer_bottom >= inner_bottom
-}
-
 impl ImplWindow {
     pub fn new(window_id: u32) -> ImplWindow {
         ImplWindow { window_id }
@@ -265,33 +253,31 @@ impl ImplWindow {
             snapshots.push(info);
         }
 
-        let mut records = Vec::with_capacity(snapshots.len());
+        let mut records = snapshots
+            .iter()
+            .cloned()
+            .map(|info| WindowInfoRecord {
+                info,
+                parent_id: None,
+            })
+            .collect::<Vec<_>>();
 
-        for (index, info) in snapshots.iter().enumerate() {
-            let parent_id = if options.include_children {
-                snapshots
-                    .iter()
-                    .enumerate()
-                    .skip(index + 1)
-                    .filter(|(_, candidate)| {
-                        candidate.pid == info.pid
-                            && candidate.id != info.id
-                            && (candidate.width > info.width || candidate.height > info.height)
-                            && contains_window(candidate, info)
-                    })
-                    .min_by_key(|(_, candidate)| candidate.width as u64 * candidate.height as u64)
-                    .map(|(_, candidate)| candidate.id)
-            } else {
-                None
-            };
+        if options.include_children {
+            let accessibility_cache = accessibility::accessibility_cache_for(&snapshots);
 
-            records.push(WindowInfoRecord {
-                info: info.clone(),
-                parent_id,
-            });
+            for snapshot in &snapshots {
+                if let Some(Some(app)) = accessibility_cache.get(&snapshot.pid) {
+                    records.extend(accessibility::descendant_records_for_window(snapshot, app));
+                }
+            }
         }
 
         Ok(build_window_info_tree(records, options))
+    }
+
+    pub fn debug_macos_accessibility(options: &WindowQueryOptions) -> XCapResult<Vec<String>> {
+        let windows = Self::query(options)?;
+        Ok(accessibility::debug_lines_for_windows(&windows))
     }
 }
 

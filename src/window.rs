@@ -29,6 +29,11 @@ impl Window {
     pub fn query(options: WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
         ImplWindow::query(&options)
     }
+
+    #[cfg(target_os = "macos")]
+    pub fn debug_macos_accessibility(options: WindowQueryOptions) -> XCapResult<Vec<String>> {
+        ImplWindow::debug_macos_accessibility(&options)
+    }
 }
 
 impl Window {

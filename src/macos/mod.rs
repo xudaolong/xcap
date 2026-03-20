@@ -1,3 +1,4 @@
+mod accessibility;
 mod capture;
 
 pub mod impl_monitor;
