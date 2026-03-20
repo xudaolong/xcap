@@ -23,7 +23,7 @@ pub use image;
 
 pub use error::{XCapError, XCapResult};
 pub use monitor::Monitor;
-pub use window::Window;
+pub use window::{Window, WindowInfo, WindowQueryOptions, WindowSizeFilter};
 
 pub use video_recorder::Frame;
 pub use video_recorder::VideoRecorder;

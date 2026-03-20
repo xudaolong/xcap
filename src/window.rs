@@ -1,4 +1,5 @@
 use image::RgbaImage;
+use std::collections::HashMap;
 
 use crate::{Monitor, error::XCapResult, platform::impl_window::ImplWindow};
 
@@ -22,6 +23,11 @@ impl Window {
             .collect();
 
         Ok(windows)
+    }
+
+    /// Query windows with custom options.
+    pub fn query(options: WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        ImplWindow::query(&options)
     }
 }
 
@@ -83,5 +89,286 @@ impl Window {
 impl Window {
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
         self.impl_window.capture_image()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub pid: u32,
+    pub app_name: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_minimized: bool,
+    pub is_maximized: bool,
+    pub is_focused: bool,
+    pub children: Vec<WindowInfo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowSizeFilter {
+    pub min_width: Option<u32>,
+    pub max_width: Option<u32>,
+    pub min_height: Option<u32>,
+    pub max_height: Option<u32>,
+}
+
+impl WindowSizeFilter {
+    fn matches(&self, width: u32, height: u32) -> bool {
+        if let Some(min_width) = self.min_width {
+            if width < min_width {
+                return false;
+            }
+        }
+
+        if let Some(max_width) = self.max_width {
+            if width > max_width {
+                return false;
+            }
+        }
+
+        if let Some(min_height) = self.min_height {
+            if height < min_height {
+                return false;
+            }
+        }
+
+        if let Some(max_height) = self.max_height {
+            if height > max_height {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowQueryOptions {
+    pub include_children: bool,
+    pub size_filter: Option<WindowSizeFilter>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WindowInfoRecord {
+    pub info: WindowInfo,
+    pub parent_id: Option<u32>,
+}
+
+pub(crate) fn build_window_info_tree(
+    records: Vec<WindowInfoRecord>,
+    options: &WindowQueryOptions,
+) -> Vec<WindowInfo> {
+    let mut info_by_id = HashMap::new();
+    let mut child_ids_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut root_ids = Vec::new();
+
+    for record in &records {
+        info_by_id.insert(record.info.id, record.info.clone());
+    }
+
+    for record in &records {
+        match record.parent_id {
+            Some(parent_id) if info_by_id.contains_key(&parent_id) => {
+                child_ids_by_parent
+                    .entry(parent_id)
+                    .or_default()
+                    .push(record.info.id);
+            }
+            _ => root_ids.push(record.info.id),
+        }
+    }
+
+    fn build_node(
+        id: u32,
+        info_by_id: &HashMap<u32, WindowInfo>,
+        child_ids_by_parent: &HashMap<u32, Vec<u32>>,
+        options: &WindowQueryOptions,
+    ) -> Vec<WindowInfo> {
+        let Some(mut node) = info_by_id.get(&id).cloned() else {
+            return Vec::new();
+        };
+
+        let promoted_children = child_ids_by_parent
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .flat_map(|child_id| build_node(*child_id, info_by_id, child_ids_by_parent, options))
+            .collect::<Vec<_>>();
+
+        if options.include_children {
+            node.children = promoted_children.clone();
+        } else {
+            node.children.clear();
+        }
+
+        let matches = options
+            .size_filter
+            .as_ref()
+            .is_none_or(|filter| filter.matches(node.width, node.height));
+
+        if matches {
+            vec![node]
+        } else if options.include_children {
+            promoted_children
+        } else {
+            Vec::new()
+        }
+    }
+
+    root_ids
+        .into_iter()
+        .flat_map(|id| build_node(id, &info_by_id, &child_ids_by_parent, options))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window_info(id: u32, width: u32, height: u32) -> WindowInfo {
+        WindowInfo {
+            id,
+            pid: id,
+            app_name: format!("app-{id}"),
+            title: format!("window-{id}"),
+            x: 0,
+            y: 0,
+            z: id as i32,
+            width,
+            height,
+            is_minimized: false,
+            is_maximized: false,
+            is_focused: false,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_window_info_tree_with_children() {
+        let records = vec![
+            WindowInfoRecord {
+                info: window_info(1, 800, 600),
+                parent_id: None,
+            },
+            WindowInfoRecord {
+                info: window_info(2, 400, 300),
+                parent_id: Some(1),
+            },
+            WindowInfoRecord {
+                info: window_info(3, 200, 100),
+                parent_id: Some(2),
+            },
+        ];
+
+        let result = build_window_info_tree(
+            records,
+            &WindowQueryOptions {
+                include_children: true,
+                size_filter: None,
+            },
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 1);
+        assert_eq!(result[0].children.len(), 1);
+        assert_eq!(result[0].children[0].id, 2);
+        assert_eq!(result[0].children[0].children.len(), 1);
+        assert_eq!(result[0].children[0].children[0].id, 3);
+    }
+
+    #[test]
+    fn test_build_window_info_tree_without_children() {
+        let records = vec![
+            WindowInfoRecord {
+                info: window_info(1, 800, 600),
+                parent_id: None,
+            },
+            WindowInfoRecord {
+                info: window_info(2, 400, 300),
+                parent_id: Some(1),
+            },
+        ];
+
+        let result = build_window_info_tree(
+            records,
+            &WindowQueryOptions {
+                include_children: false,
+                size_filter: None,
+            },
+        );
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].children.is_empty());
+    }
+
+    #[test]
+    fn test_build_window_info_tree_filters_by_size() {
+        let records = vec![
+            WindowInfoRecord {
+                info: window_info(1, 300, 200),
+                parent_id: None,
+            },
+            WindowInfoRecord {
+                info: window_info(2, 800, 600),
+                parent_id: None,
+            },
+        ];
+
+        let result = build_window_info_tree(
+            records,
+            &WindowQueryOptions {
+                include_children: false,
+                size_filter: Some(WindowSizeFilter {
+                    min_width: Some(500),
+                    max_width: None,
+                    min_height: Some(400),
+                    max_height: None,
+                }),
+            },
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 2);
+    }
+
+    #[test]
+    fn test_filtered_parent_promotes_matching_children() {
+        let records = vec![
+            WindowInfoRecord {
+                info: window_info(1, 200, 100),
+                parent_id: None,
+            },
+            WindowInfoRecord {
+                info: window_info(2, 600, 400),
+                parent_id: Some(1),
+            },
+            WindowInfoRecord {
+                info: window_info(3, 700, 500),
+                parent_id: Some(2),
+            },
+        ];
+
+        let result = build_window_info_tree(
+            records,
+            &WindowQueryOptions {
+                include_children: true,
+                size_filter: Some(WindowSizeFilter {
+                    min_width: Some(500),
+                    max_width: None,
+                    min_height: Some(300),
+                    max_height: None,
+                }),
+            },
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 2);
+        assert_eq!(result[0].children.len(), 1);
+        assert_eq!(result[0].children[0].id, 3);
     }
 }

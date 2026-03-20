@@ -12,7 +12,11 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSNumber, NSString};
 
-use crate::{XCapError, error::XCapResult};
+use crate::{
+    XCapError,
+    error::XCapResult,
+    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+};
 
 use super::{capture::capture, impl_monitor::ImplMonitor};
 
@@ -153,6 +157,30 @@ pub fn get_window_cf_dictionary(window_id: u32) -> XCapResult<CFRetained<CFDicti
     }
 }
 
+fn get_active_app_pid() -> Option<u32> {
+    let pid_key = NSString::from_str("NSApplicationProcessIdentifier");
+
+    let workspace = NSWorkspace::sharedWorkspace();
+
+    workspace
+        .activeApplication()
+        .and_then(|dict| dict.valueForKey(&pid_key))
+        .and_then(|pid| pid.downcast::<NSNumber>().ok())
+        .map(|pid| pid.intValue() as u32)
+}
+
+fn contains_window(outer: &WindowInfo, inner: &WindowInfo) -> bool {
+    let outer_right = outer.x + outer.width as i32;
+    let outer_bottom = outer.y + outer.height as i32;
+    let inner_right = inner.x + inner.width as i32;
+    let inner_bottom = inner.y + inner.height as i32;
+
+    outer.x <= inner.x
+        && outer.y <= inner.y
+        && outer_right >= inner_right
+        && outer_bottom >= inner_bottom
+}
+
 impl ImplWindow {
     pub fn new(window_id: u32) -> ImplWindow {
         ImplWindow { window_id }
@@ -200,6 +228,70 @@ impl ImplWindow {
 
             Ok(impl_window)
         }
+    }
+
+    pub fn query(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let impl_windows = Self::all()?;
+        let focused_pid = get_active_app_pid();
+        let mut snapshots = Vec::with_capacity(impl_windows.len());
+
+        for impl_window in impl_windows {
+            let window_cf_dictionary = get_window_cf_dictionary(impl_window.window_id)?;
+            let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
+            let pid =
+                get_cf_number_i32_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerPID")? as u32;
+            let app_name =
+                get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerName")?;
+            let title = get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowName")?;
+            let is_on_screen =
+                get_cf_bool_value(window_cf_dictionary.as_ref(), "kCGWindowIsOnscreen")?;
+
+            let info = WindowInfo {
+                id: impl_window.window_id,
+                pid,
+                app_name,
+                title,
+                x: cg_rect.origin.x as i32,
+                y: cg_rect.origin.y as i32,
+                z: impl_window.z()?,
+                width: cg_rect.size.width as u32,
+                height: cg_rect.size.height as u32,
+                is_minimized: !is_on_screen && !impl_window.is_maximized()?,
+                is_maximized: impl_window.is_maximized()?,
+                is_focused: focused_pid == Some(pid),
+                children: Vec::new(),
+            };
+
+            snapshots.push(info);
+        }
+
+        let mut records = Vec::with_capacity(snapshots.len());
+
+        for (index, info) in snapshots.iter().enumerate() {
+            let parent_id = if options.include_children {
+                snapshots
+                    .iter()
+                    .enumerate()
+                    .skip(index + 1)
+                    .filter(|(_, candidate)| {
+                        candidate.pid == info.pid
+                            && candidate.id != info.id
+                            && (candidate.width > info.width || candidate.height > info.height)
+                            && contains_window(candidate, info)
+                    })
+                    .min_by_key(|(_, candidate)| candidate.width as u64 * candidate.height as u64)
+                    .map(|(_, candidate)| candidate.id)
+            } else {
+                None
+            };
+
+            records.push(WindowInfoRecord {
+                info: info.clone(),
+                parent_id,
+            });
+        }
+
+        Ok(build_window_info_tree(records, options))
     }
 }
 

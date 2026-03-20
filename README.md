@@ -199,6 +199,62 @@ fn main() {
 
 ```
 
+-   Window Query
+
+Suitable for:
+
+-   Returning window position and size in one call.
+-   Returning a tree of child windows on macOS and Windows.
+-   Filtering out windows that are too small or too large before further processing.
+-   Building automation around floating panels, dialogs, embedded webviews, or tool windows.
+
+```rust
+use xcap::{Window, WindowQueryOptions, WindowSizeFilter};
+
+fn print_window_tree(windows: &[xcap::WindowInfo], depth: usize) {
+    for window in windows {
+        println!(
+            "{}- {} ({}) pos=({}, {}) size={}x{} minimized={} maximized={} focused={}",
+            "  ".repeat(depth),
+            window.title,
+            window.app_name,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
+            window.is_minimized,
+            window.is_maximized,
+            window.is_focused
+        );
+
+        print_window_tree(&window.children, depth + 1);
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let windows = Window::query(WindowQueryOptions {
+        include_children: true,
+        size_filter: Some(WindowSizeFilter {
+            min_width: Some(300),
+            max_width: None,
+            min_height: Some(200),
+            max_height: None,
+        }),
+    })?;
+
+    print_window_tree(&windows, 0);
+
+    Ok(())
+}
+```
+
+The returned `WindowInfo` includes:
+
+-   `id`, `pid`, `app_name`, `title`
+-   `x`, `y`, `z`, `width`, `height`
+-   `is_minimized`, `is_maximized`, `is_focused`
+-   `children` for nested sub-window structure
+
 More examples in [examples](./examples)
 
 ## Linux System Requirements

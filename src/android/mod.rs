@@ -1,6 +1,7 @@
 use crate::{
     error::{XCapError, XCapResult},
     video_recorder::Frame,
+    window::{WindowInfo, WindowQueryOptions},
 };
 use image::RgbaImage;
 use std::sync::mpsc::Receiver;
@@ -90,6 +91,10 @@ pub struct ImplWindow;
 impl ImplWindow {
     pub fn all() -> XCapResult<Vec<ImplWindow>> {
         Ok(Vec::new())
+    }
+
+    pub fn query(_options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        Err(XCapError::NotSupported)
     }
 
     pub fn id(&self) -> XCapResult<u32> {

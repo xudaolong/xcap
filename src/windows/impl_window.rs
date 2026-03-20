@@ -16,15 +16,19 @@ use windows::{
             Threading::{GetCurrentProcessId, PROCESS_QUERY_LIMITED_INFORMATION},
         },
         UI::WindowsAndMessaging::{
-            EnumWindows, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
-            GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-            IsWindowVisible, IsZoomed, WINDOW_EX_STYLE, WS_EX_TOOLWINDOW,
+            EnumWindows, GW_CHILD, GW_HWNDNEXT, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow,
+            GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+            GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+            WINDOW_EX_STYLE, WS_EX_TOOLWINDOW,
         },
     },
     core::{BOOL, HSTRING, PCWSTR},
 };
 
-use crate::error::XCapResult;
+use crate::{
+    error::XCapResult,
+    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+};
 
 use super::{
     capture::capture_window,
@@ -175,6 +179,52 @@ fn get_window_title(hwnd: HWND) -> XCapResult<String> {
     }
 }
 
+fn is_valid_child_window(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+
+        if get_window_pid(hwnd) == GetCurrentProcessId() {
+            return false;
+        }
+
+        if is_window_cloaked(hwnd) {
+            return false;
+        }
+
+        if let Ok(rect) = get_window_bounds(hwnd) {
+            return !IsRectEmpty(&rect).as_bool();
+        }
+
+        false
+    }
+}
+
+fn child_hwnds(parent: HWND) -> Vec<HWND> {
+    let mut hwnds = Vec::new();
+
+    unsafe {
+        let mut child = match GetWindow(parent, GW_CHILD) {
+            Ok(hwnd) => hwnd,
+            Err(_) => return hwnds,
+        };
+
+        while !child.0.is_null() {
+            if is_valid_child_window(child) {
+                hwnds.push(child);
+            }
+
+            child = match GetWindow(child, GW_HWNDNEXT) {
+                Ok(hwnd) => hwnd,
+                Err(_) => break,
+            };
+        }
+    }
+
+    hwnds
+}
+
 #[derive(Debug, Default)]
 struct LangCodePage {
     pub w_language: u16,
@@ -306,6 +356,53 @@ fn get_app_name(pid: u32) -> XCapResult<String> {
     }
 }
 
+fn collect_window_record(
+    hwnd: HWND,
+    parent_id: Option<u32>,
+    z: i32,
+    include_children: bool,
+    records: &mut Vec<WindowInfoRecord>,
+) -> XCapResult<()> {
+    let impl_window = ImplWindow::new(hwnd);
+    let id = impl_window.id()?;
+
+    records.push(WindowInfoRecord {
+        info: WindowInfo {
+            id,
+            pid: impl_window.pid()?,
+            app_name: impl_window.app_name()?,
+            title: impl_window.title()?,
+            x: impl_window.x()?,
+            y: impl_window.y()?,
+            z,
+            width: impl_window.width()?,
+            height: impl_window.height()?,
+            is_minimized: impl_window.is_minimized()?,
+            is_maximized: impl_window.is_maximized()?,
+            is_focused: impl_window.is_focused()?,
+            children: Vec::new(),
+        },
+        parent_id,
+    });
+
+    if include_children {
+        let children = child_hwnds(hwnd);
+        let sibling_count = children.len() as i32;
+
+        for (index, child) in children.into_iter().enumerate() {
+            collect_window_record(
+                child,
+                Some(id),
+                sibling_count - index as i32 - 1,
+                true,
+                records,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 impl ImplWindow {
     fn new(hwnd: HWND) -> ImplWindow {
         ImplWindow { hwnd }
@@ -326,6 +423,30 @@ impl ImplWindow {
         }
 
         Ok(impl_windows)
+    }
+
+    pub fn query(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let hwnds_mut_ptr: *mut Vec<HWND> = Box::into_raw(Box::default());
+
+        let hwnds = unsafe {
+            EnumWindows(Some(enum_valid_windows), LPARAM(hwnds_mut_ptr as isize))?;
+            Box::from_raw(hwnds_mut_ptr)
+        };
+
+        let mut records = Vec::new();
+        let root_count = hwnds.len() as i32;
+
+        for (index, &hwnd) in hwnds.iter().enumerate() {
+            collect_window_record(
+                hwnd,
+                None,
+                root_count - index as i32 - 1,
+                options.include_children,
+                &mut records,
+            )?;
+        }
+
+        Ok(build_window_info_tree(records, options))
     }
 }
 

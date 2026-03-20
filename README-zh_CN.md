@@ -199,6 +199,62 @@ fn main() {
 
 ```
 
+-   窗口查询
+
+适用场景：
+
+-   一次性返回窗口位置和大小。
+-   在 macOS 和 Windows 上返回树状子窗口结构。
+-   在后续处理前先过滤过小或过大的窗口。
+-   用于悬浮面板、对话框、内嵌 WebView、工具窗口等自动化场景。
+
+```rust
+use xcap::{Window, WindowQueryOptions, WindowSizeFilter};
+
+fn print_window_tree(windows: &[xcap::WindowInfo], depth: usize) {
+    for window in windows {
+        println!(
+            "{}- {} ({}) pos=({}, {}) size={}x{} minimized={} maximized={} focused={}",
+            "  ".repeat(depth),
+            window.title,
+            window.app_name,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
+            window.is_minimized,
+            window.is_maximized,
+            window.is_focused
+        );
+
+        print_window_tree(&window.children, depth + 1);
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let windows = Window::query(WindowQueryOptions {
+        include_children: true,
+        size_filter: Some(WindowSizeFilter {
+            min_width: Some(300),
+            max_width: None,
+            min_height: Some(200),
+            max_height: None,
+        }),
+    })?;
+
+    print_window_tree(&windows, 0);
+
+    Ok(())
+}
+```
+
+返回的 `WindowInfo` 包含：
+
+-   `id`、`pid`、`app_name`、`title`
+-   `x`、`y`、`z`、`width`、`height`
+-   `is_minimized`、`is_maximized`、`is_focused`
+-   `children`，用于表示嵌套的子窗口结构
+
 更多例子可以在 [examples](./examples) 目录中找到。
 
 ## Linux 系统要求

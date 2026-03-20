@@ -8,7 +8,10 @@ use xcb::{
     },
 };
 
-use crate::error::{XCapError, XCapResult};
+use crate::{
+    error::{XCapError, XCapResult},
+    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+};
 
 use super::{
     capture::capture_window,
@@ -163,6 +166,34 @@ impl ImplWindow {
         impl_windows.reverse();
 
         Ok(impl_windows)
+    }
+
+    pub fn query(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let impl_windows = Self::all()?;
+        let mut records = Vec::with_capacity(impl_windows.len());
+
+        for impl_window in impl_windows {
+            records.push(WindowInfoRecord {
+                info: WindowInfo {
+                    id: impl_window.id()?,
+                    pid: impl_window.pid()?,
+                    app_name: impl_window.app_name()?,
+                    title: impl_window.title()?,
+                    x: impl_window.x()?,
+                    y: impl_window.y()?,
+                    z: impl_window.z()?,
+                    width: impl_window.width()?,
+                    height: impl_window.height()?,
+                    is_minimized: impl_window.is_minimized()?,
+                    is_maximized: impl_window.is_maximized()?,
+                    is_focused: impl_window.is_focused()?,
+                    children: Vec::new(),
+                },
+                parent_id: None,
+            });
+        }
+
+        Ok(build_window_info_tree(records, options))
     }
 }
 
