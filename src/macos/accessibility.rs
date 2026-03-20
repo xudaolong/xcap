@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::c_void,
     hash::{Hash, Hasher},
     ptr::{self, NonNull},
@@ -16,6 +16,7 @@ const AX_VALUE_TYPE_CGPOINT: u32 = 1;
 const AX_VALUE_TYPE_CGSIZE: u32 = 2;
 const MAX_AX_DEPTH: usize = 6;
 const MAX_AX_CHILDREN_PER_NODE: usize = 128;
+const MAX_AX_NODES_PER_WINDOW: usize = 1024;
 
 #[derive(Debug)]
 #[repr(C)]
@@ -137,6 +138,9 @@ pub(super) fn descendant_records_for_window(
     };
 
     let mut records = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(element_ptr_key(&window.element));
+    let mut visited_count = 1usize;
     collect_descendant_records(
         root.id,
         &window.element,
@@ -144,6 +148,8 @@ pub(super) fn descendant_records_for_window(
         &root.app_name,
         app.focused_element_ptr,
         0,
+        &mut visited,
+        &mut visited_count,
         &mut records,
     );
 
@@ -194,7 +200,16 @@ pub(super) fn debug_lines_for_window(
         match_score(root, window)
     ));
 
-    collect_debug_descendant_lines(&window.element, 1, &mut lines);
+    let mut visited = HashSet::new();
+    visited.insert(element_ptr_key(&window.element));
+    let mut visited_count = 1usize;
+    collect_debug_descendant_lines(
+        &window.element,
+        1,
+        &mut visited,
+        &mut visited_count,
+        &mut lines,
+    );
 
     lines
 }
@@ -257,9 +272,11 @@ fn collect_descendant_records(
     app_name: &str,
     focused_element_ptr: Option<usize>,
     depth: usize,
+    visited: &mut HashSet<usize>,
+    visited_count: &mut usize,
     records: &mut Vec<WindowInfoRecord>,
 ) {
-    if depth >= MAX_AX_DEPTH {
+    if depth >= MAX_AX_DEPTH || *visited_count >= MAX_AX_NODES_PER_WINDOW {
         return;
     }
 
@@ -267,6 +284,15 @@ fn collect_descendant_records(
     let sibling_count = children.len() as i32;
 
     for (index, child) in children.into_iter().enumerate() {
+        let child_ptr = element_ptr_key(&child);
+        if !visited.insert(child_ptr) {
+            continue;
+        }
+        *visited_count += 1;
+        if *visited_count > MAX_AX_NODES_PER_WINDOW {
+            break;
+        }
+
         let Some(info) = build_ax_info(
             &child,
             pid,
@@ -291,17 +317,43 @@ fn collect_descendant_records(
             app_name,
             focused_element_ptr,
             depth + 1,
+            visited,
+            visited_count,
             records,
         );
     }
 }
 
-fn collect_debug_descendant_lines(element: &AXUIElement, depth: usize, lines: &mut Vec<String>) {
-    if depth > MAX_AX_DEPTH {
+fn collect_debug_descendant_lines(
+    element: &AXUIElement,
+    depth: usize,
+    visited: &mut HashSet<usize>,
+    visited_count: &mut usize,
+    lines: &mut Vec<String>,
+) {
+    if depth > MAX_AX_DEPTH || *visited_count >= MAX_AX_NODES_PER_WINDOW {
         return;
     }
 
     for child in ax_array_attribute_elements(element, "AXChildren") {
+        let child_ptr = element_ptr_key(&child);
+        if !visited.insert(child_ptr) {
+            lines.push(format!(
+                "{}AX child skipped: cycle detected ptr=0x{child_ptr:x}",
+                "  ".repeat(depth + 1),
+            ));
+            continue;
+        }
+        *visited_count += 1;
+        if *visited_count > MAX_AX_NODES_PER_WINDOW {
+            lines.push(format!(
+                "{}AX child traversal stopped: node limit {} reached",
+                "  ".repeat(depth + 1),
+                MAX_AX_NODES_PER_WINDOW
+            ));
+            break;
+        }
+
         let role = ax_string_attribute(&child, "AXRole").unwrap_or_default();
         let subrole = ax_string_attribute(&child, "AXSubrole").unwrap_or_default();
         let title = ax_string_attribute(&child, "AXTitle").unwrap_or_default();
@@ -326,7 +378,7 @@ fn collect_debug_descendant_lines(element: &AXUIElement, depth: usize, lines: &m
             minimized
         ));
 
-        collect_debug_descendant_lines(&child, depth + 1, lines);
+        collect_debug_descendant_lines(&child, depth + 1, visited, visited_count, lines);
     }
 }
 
@@ -619,5 +671,20 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn test_cycle_detection_uses_pointer_keys() {
+        let ptr = 0x12345usize;
+        let mut visited = HashSet::new();
+
+        assert!(visited.insert(ptr));
+        assert!(!visited.insert(ptr));
+    }
+
+    #[test]
+    fn test_ax_node_limit_is_positive() {
+        assert!(MAX_AX_NODES_PER_WINDOW > 0);
+        assert!(MAX_AX_NODES_PER_WINDOW >= MAX_AX_CHILDREN_PER_NODE);
     }
 }
