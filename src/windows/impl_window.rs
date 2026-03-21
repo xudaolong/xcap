@@ -1,5 +1,5 @@
 use core::slice;
-use std::{ffi::c_void, mem, ptr};
+use std::{ffi::c_void, mem, path::Path, ptr};
 
 use image::RgbaImage;
 use widestring::U16CString;
@@ -13,7 +13,10 @@ use windows::{
         Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
         System::{
             ProcessStatus::{GetModuleBaseNameW, GetModuleFileNameExW},
-            Threading::{GetCurrentProcessId, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{
+                GetCurrentProcessId, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
         },
         UI::WindowsAndMessaging::{
             EnumWindows, GW_CHILD, GW_HWNDNEXT, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow,
@@ -253,6 +256,45 @@ fn get_module_basename(handle: HANDLE) -> XCapResult<String> {
     }
 }
 
+fn get_process_image_path(handle: HANDLE) -> XCapResult<String> {
+    unsafe {
+        let mut filename = vec![0u16; MAX_PATH as usize];
+        let mut size = filename.len() as u32;
+
+        let is_success = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(filename.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+
+        if is_success && size > 0 {
+            filename.truncate(size as usize);
+            return Ok(U16CString::from_vec_truncate(filename).to_string()?);
+        }
+
+        let mut fallback = [0u16; MAX_PATH as usize];
+        let size = GetModuleFileNameExW(Some(handle), None, &mut fallback) as usize;
+        if size > 0 {
+            return Ok(U16CString::from_vec_truncate(&fallback[..size]).to_string()?);
+        }
+
+        Err(crate::XCapError::new(format!(
+            "Get process image path failed: {:?}",
+            GetLastError()
+        )))
+    }
+}
+
+fn basename_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .or_else(|| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 fn get_window_pid(hwnd: HWND) -> u32 {
     unsafe {
         let mut lp_dw_process_id = 0;
@@ -271,20 +313,22 @@ fn get_app_name(pid: u32) -> XCapResult<String> {
             }
         };
 
-        let mut filename = [0; MAX_PATH as usize];
-        GetModuleFileNameExW(Some(*scope_guard_handle), None, &mut filename);
+        let image_path = match get_process_image_path(*scope_guard_handle) {
+            Ok(path) if !path.is_empty() => path,
+            Ok(_) => return get_module_basename(*scope_guard_handle),
+            Err(err) => {
+                log::debug!("get_process_image_path failed for pid {pid}: {err}");
+                return get_module_basename(*scope_guard_handle);
+            }
+        };
 
+        let filename = U16CString::from_str(&image_path)
+            .map_err(|err| crate::XCapError::new(err.to_string()))?;
         let pcw_filename = PCWSTR::from_raw(filename.as_ptr());
 
         let file_version_info_size_w = GetFileVersionInfoSizeW(pcw_filename, None);
         if file_version_info_size_w == 0 {
-            log::error!(
-                "GetFileVersionInfoSizeW({:?}) failed: {:?}",
-                pcw_filename,
-                GetLastError()
-            );
-
-            return get_module_basename(*scope_guard_handle);
+            return Ok(basename_from_path(&image_path));
         }
 
         let mut file_version_info = vec![0u16; file_version_info_size_w as usize];
@@ -352,7 +396,12 @@ fn get_app_name(pid: u32) -> XCapResult<String> {
             }
         }
 
-        get_module_basename(*scope_guard_handle)
+        let basename = basename_from_path(&image_path);
+        if basename.is_empty() {
+            get_module_basename(*scope_guard_handle)
+        } else {
+            Ok(basename)
+        }
     }
 }
 
