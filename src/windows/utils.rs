@@ -28,6 +28,7 @@ use windows::{
             Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW},
             Threading::{OpenProcess, PROCESS_ACCESS_RIGHTS},
         },
+        UI::WindowsAndMessaging::GetWindowRect,
     },
     core::{HRESULT, Interface, PCWSTR, s, w},
 };
@@ -242,12 +243,16 @@ pub(super) fn get_window_bounds(hwnd: HWND) -> XCapResult<RECT> {
     let mut rect = RECT::default();
 
     unsafe {
-        DwmGetWindowAttribute(
+        let result = DwmGetWindowAttribute(
             hwnd,
             DWMWA_EXTENDED_FRAME_BOUNDS,
             &mut rect as *mut RECT as *mut c_void,
             mem::size_of::<RECT>() as u32,
-        )?;
+        );
+
+        if result.is_err() {
+            GetWindowRect(hwnd, &mut rect)?;
+        }
     }
 
     Ok(rect)

@@ -182,26 +182,34 @@ fn get_window_title(hwnd: HWND) -> XCapResult<String> {
     }
 }
 
-fn is_valid_child_window(hwnd: HWND) -> bool {
+fn child_window_filter_reason(hwnd: HWND) -> Option<&'static str> {
     unsafe {
         if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
-            return false;
+            return Some("not-visible-or-invalid");
         }
 
         if get_window_pid(hwnd) == GetCurrentProcessId() {
-            return false;
+            return Some("current-process");
         }
 
         if is_window_cloaked(hwnd) {
-            return false;
+            return Some("cloaked");
         }
 
         if let Ok(rect) = get_window_bounds(hwnd) {
-            return !IsRectEmpty(&rect).as_bool();
+            if IsRectEmpty(&rect).as_bool() {
+                return Some("empty-bounds");
+            }
+
+            return None;
         }
 
-        false
+        Some("bounds-unavailable")
     }
+}
+
+fn is_valid_child_window(hwnd: HWND) -> bool {
+    child_window_filter_reason(hwnd).is_none()
 }
 
 fn child_hwnds(parent: HWND) -> Vec<HWND> {
@@ -218,6 +226,41 @@ fn child_hwnds(parent: HWND) -> Vec<HWND> {
                 hwnds.push(child);
             }
 
+            child = match GetWindow(child, GW_HWNDNEXT) {
+                Ok(hwnd) => hwnd,
+                Err(_) => break,
+            };
+        }
+    }
+
+    hwnds
+}
+
+fn get_class_name(hwnd: HWND) -> String {
+    unsafe {
+        let mut lp_class_name = [0u16; MAX_PATH as usize];
+        let len = GetClassNameW(hwnd, &mut lp_class_name) as usize;
+        if len == 0 {
+            return String::new();
+        }
+
+        U16CString::from_vec_truncate(&lp_class_name[..len])
+            .to_string()
+            .unwrap_or_default()
+    }
+}
+
+fn all_child_hwnds(parent: HWND) -> Vec<HWND> {
+    let mut hwnds = Vec::new();
+
+    unsafe {
+        let mut child = match GetWindow(parent, GW_CHILD) {
+            Ok(hwnd) => hwnd,
+            Err(_) => return hwnds,
+        };
+
+        while !child.0.is_null() {
+            hwnds.push(child);
             child = match GetWindow(child, GW_HWNDNEXT) {
                 Ok(hwnd) => hwnd,
                 Err(_) => break,
@@ -496,6 +539,59 @@ impl ImplWindow {
         }
 
         Ok(build_window_info_tree(records, options))
+    }
+
+    pub fn debug_windows_children(options: &WindowQueryOptions) -> XCapResult<Vec<String>> {
+        let hwnds_mut_ptr: *mut Vec<HWND> = Box::into_raw(Box::default());
+
+        let hwnds = unsafe {
+            EnumWindows(Some(enum_valid_windows), LPARAM(hwnds_mut_ptr as isize))?;
+            Box::from_raw(hwnds_mut_ptr)
+        };
+
+        let mut lines = Vec::new();
+
+        for &hwnd in hwnds.iter() {
+            let impl_window = ImplWindow::new(hwnd);
+            let title = impl_window.title().unwrap_or_default();
+            let app = impl_window.app_name().unwrap_or_default();
+            let bounds = get_window_bounds(hwnd).ok();
+            let all_children = all_child_hwnds(hwnd);
+            let kept_children = child_hwnds(hwnd);
+
+            let top_level = format!(
+                "top hwnd={:?} title={:?} app={:?} bounds={:?} include_children={} total_children={} kept_children={}",
+                hwnd,
+                title,
+                app,
+                bounds.map(|r| (r.left, r.top, r.right, r.bottom)),
+                options.include_children,
+                all_children.len(),
+                kept_children.len()
+            );
+            lines.push(top_level);
+
+            for child in all_children {
+                let child_title = get_window_title(child).unwrap_or_default();
+                let class_name = get_class_name(child);
+                let bounds = get_window_bounds(child)
+                    .ok()
+                    .map(|r| (r.left, r.top, r.right, r.bottom));
+                let reason = child_window_filter_reason(child);
+
+                lines.push(format!(
+                    "  child hwnd={:?} class={:?} title={:?} bounds={:?} kept={} reason={}",
+                    child,
+                    class_name,
+                    child_title,
+                    bounds,
+                    reason.is_none(),
+                    reason.unwrap_or("accepted")
+                ));
+            }
+        }
+
+        Ok(lines)
     }
 }
 

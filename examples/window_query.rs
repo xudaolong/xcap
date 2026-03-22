@@ -47,5 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    if env::var_os("XCAP_WINDOW_QUERY_DEBUG").is_some() {
+        println!("\n== Windows child window debug ==");
+        for line in Window::debug_windows_children(options)? {
+            println!("{line}");
+        }
+    }
+
     Ok(())
 }

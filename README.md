@@ -255,7 +255,7 @@ The returned `WindowInfo` includes:
 -   `is_minimized`, `is_maximized`, `is_focused`
 -   `children` for nested sub-window structure
 
-To inspect why macOS `children` may still be empty, run:
+To inspect why `children` may still be empty on macOS or Windows, run:
 
 ```sh
 XCAP_WINDOW_QUERY_DEBUG=1 cargo run --example window_query
