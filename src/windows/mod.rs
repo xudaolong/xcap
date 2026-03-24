@@ -1,3 +1,4 @@
+mod accessibility;
 mod capture;
 #[cfg(not(feature = "wgc"))]
 mod dxgi_video_recorder;

@@ -1,5 +1,5 @@
 use core::slice;
-use std::{ffi::c_void, mem, path::Path, ptr};
+use std::{collections::HashSet, ffi::c_void, mem, path::Path, ptr};
 
 use image::RgbaImage;
 use widestring::U16CString;
@@ -34,6 +34,7 @@ use crate::{
 };
 
 use super::{
+    accessibility::collect_uia_children,
     capture::capture_window,
     impl_monitor::ImplMonitor,
     utils::{get_window_bounds, open_process},
@@ -453,16 +454,21 @@ fn collect_window_record(
     parent_id: Option<u32>,
     z: i32,
     include_children: bool,
+    next_synthetic_id: &mut u32,
+    used_ids: &mut HashSet<u32>,
     records: &mut Vec<WindowInfoRecord>,
 ) -> XCapResult<()> {
     let impl_window = ImplWindow::new(hwnd);
     let id = impl_window.id()?;
+    used_ids.insert(id);
+    let pid = impl_window.pid()?;
+    let app_name = impl_window.app_name()?;
 
     records.push(WindowInfoRecord {
         info: WindowInfo {
             id,
-            pid: impl_window.pid()?,
-            app_name: impl_window.app_name()?,
+            pid,
+            app_name: app_name.clone(),
             title: impl_window.title()?,
             x: impl_window.x()?,
             y: impl_window.y()?,
@@ -481,14 +487,30 @@ fn collect_window_record(
         let children = child_hwnds(hwnd);
         let sibling_count = children.len() as i32;
 
-        for (index, child) in children.into_iter().enumerate() {
-            collect_window_record(
-                child,
-                Some(id),
-                sibling_count - index as i32 - 1,
-                true,
+        if children.is_empty() {
+            if let Err(err) = collect_uia_children(
+                hwnd,
+                id,
+                pid,
+                &app_name,
+                next_synthetic_id,
+                used_ids,
                 records,
-            )?;
+            ) {
+                log::debug!("collect_uia_children failed for {:?}: {err}", hwnd);
+            }
+        } else {
+            for (index, child) in children.into_iter().enumerate() {
+                collect_window_record(
+                    child,
+                    Some(id),
+                    sibling_count - index as i32 - 1,
+                    true,
+                    next_synthetic_id,
+                    used_ids,
+                    records,
+                )?;
+            }
         }
     }
 
@@ -526,6 +548,8 @@ impl ImplWindow {
         };
 
         let mut records = Vec::new();
+        let mut next_synthetic_id = 1u32;
+        let mut used_ids = HashSet::new();
         let root_count = hwnds.len() as i32;
 
         for (index, &hwnd) in hwnds.iter().enumerate() {
@@ -534,6 +558,8 @@ impl ImplWindow {
                 None,
                 root_count - index as i32 - 1,
                 options.include_children,
+                &mut next_synthetic_id,
+                &mut used_ids,
                 &mut records,
             )?;
         }
