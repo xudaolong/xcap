@@ -1,4 +1,8 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use windows::{
     Win32::{
@@ -17,11 +21,30 @@ use windows::{
 use crate::{
     XCapError,
     error::XCapResult,
-    window::{WindowInfo, WindowInfoRecord},
+    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions},
 };
 
-const MAX_UIA_DEPTH: usize = 5;
+const BASE_MAX_UIA_DEPTH: usize = 5;
+const DEEP_MAX_UIA_DEPTH: usize = 8;
 const MAX_UIA_NODES_PER_WINDOW: usize = 512;
+const UIA_PROBE_INTERVAL_MS: u64 = 75;
+
+#[derive(Debug, Clone, Copy)]
+struct UiaQueryOptions {
+    deep_children: bool,
+    relaxed_filtering: bool,
+    probe_timeout_ms: Option<u64>,
+}
+
+impl From<&WindowQueryOptions> for UiaQueryOptions {
+    fn from(options: &WindowQueryOptions) -> Self {
+        Self {
+            deep_children: options.deep_children,
+            relaxed_filtering: options.relaxed_filtering,
+            probe_timeout_ms: options.probe_timeout_ms,
+        }
+    }
+}
 
 struct ComInitGuard {
     should_uninitialize: bool,
@@ -104,7 +127,7 @@ fn best_title(element: &IUIAutomationElement) -> String {
     bstr_to_string(unsafe { element.CurrentLocalizedControlType() })
 }
 
-fn node_key(element: &IUIAutomationElement, rect: &RECT) -> String {
+fn node_key(element: &IUIAutomationElement, rect: Option<&RECT>) -> String {
     let hwnd = unsafe { element.CurrentNativeWindowHandle() }
         .ok()
         .map(|hwnd| hwnd.0 as usize)
@@ -112,10 +135,13 @@ fn node_key(element: &IUIAutomationElement, rect: &RECT) -> String {
     let automation_id = bstr_to_string(unsafe { element.CurrentAutomationId() });
     let class_name = bstr_to_string(unsafe { element.CurrentClassName() });
     let name = bstr_to_string(unsafe { element.CurrentName() });
+    let (left, top, right, bottom) = rect
+        .map(|rect| (rect.left, rect.top, rect.right, rect.bottom))
+        .unwrap_or_default();
 
     format!(
         "{hwnd}|{automation_id}|{class_name}|{name}|{}|{}|{}|{}",
-        rect.left, rect.top, rect.right, rect.bottom
+        left, top, right, bottom
     )
 }
 
@@ -132,19 +158,21 @@ fn next_synthetic_id(next_id: &mut u32, used_ids: &mut HashSet<u32>) -> u32 {
 
 fn should_skip_element(
     element: &IUIAutomationElement,
-    rect: &RECT,
+    rect: Option<&RECT>,
     root_hwnd: HWND,
     root_pid: u32,
+    options: UiaQueryOptions,
     visited: &mut HashSet<String>,
 ) -> bool {
-    let is_offscreen = unsafe { element.CurrentIsOffscreen() }
-        .unwrap_or(BOOL(0))
-        .as_bool();
-    if is_offscreen {
+    let key = node_key(element, rect);
+    if !visited.insert(key) {
         return true;
     }
 
-    if rect_dimensions(rect).is_none() {
+    let is_offscreen = unsafe { element.CurrentIsOffscreen() }
+        .unwrap_or(BOOL(0))
+        .as_bool();
+    if is_offscreen && !options.relaxed_filtering {
         return true;
     }
 
@@ -154,12 +182,19 @@ fn should_skip_element(
     }
 
     let pid = unsafe { element.CurrentProcessId() }.unwrap_or(root_pid as i32);
-    if pid > 0 && pid as u32 != root_pid {
+    if pid > 0 && pid as u32 != root_pid && !options.relaxed_filtering {
         return true;
     }
 
-    let key = node_key(element, rect);
-    !visited.insert(key)
+    false
+}
+
+fn max_uia_depth(options: UiaQueryOptions) -> usize {
+    if options.deep_children {
+        DEEP_MAX_UIA_DEPTH
+    } else {
+        BASE_MAX_UIA_DEPTH
+    }
 }
 
 fn collect_children_recursive(
@@ -173,9 +208,10 @@ fn collect_children_recursive(
     used_ids: &mut HashSet<u32>,
     visited: &mut HashSet<String>,
     records: &mut Vec<WindowInfoRecord>,
+    options: UiaQueryOptions,
     depth: usize,
 ) -> XCapResult<()> {
-    if depth >= MAX_UIA_DEPTH || records.len() >= MAX_UIA_NODES_PER_WINDOW {
+    if depth >= max_uia_depth(options) || records.len() >= MAX_UIA_NODES_PER_WINDOW {
         return Ok(());
     }
 
@@ -191,41 +227,42 @@ fn collect_children_recursive(
             }
 
             let child = children.GetElement(index)?;
-            let rect = match child.CurrentBoundingRectangle() {
-                Ok(rect) => rect,
-                Err(_) => continue,
-            };
+            let rect = child.CurrentBoundingRectangle().ok();
 
-            if should_skip_element(&child, &rect, root_hwnd, root_pid, visited) {
+            if should_skip_element(&child, rect.as_ref(), root_hwnd, root_pid, options, visited) {
                 continue;
             }
 
-            let Some((x, y, width, height)) = rect_dimensions(&rect) else {
+            let mut child_parent_id = parent_id;
+
+            if let Some((x, y, width, height)) = rect.as_ref().and_then(rect_dimensions) {
+                let id = next_synthetic_id(next_id, used_ids);
+                let title = best_title(&child);
+                let is_focused = child.CurrentHasKeyboardFocus().unwrap_or(BOOL(0)).as_bool();
+
+                records.push(WindowInfoRecord {
+                    info: WindowInfo {
+                        id,
+                        pid: root_pid,
+                        app_name: root_app_name.to_string(),
+                        title,
+                        x,
+                        y,
+                        z: sibling_count - index - 1,
+                        width,
+                        height,
+                        is_minimized: false,
+                        is_maximized: false,
+                        is_focused,
+                        children: Vec::new(),
+                    },
+                    parent_id: Some(parent_id),
+                });
+
+                child_parent_id = id;
+            } else if !options.deep_children {
                 continue;
-            };
-
-            let id = next_synthetic_id(next_id, used_ids);
-            let title = best_title(&child);
-            let is_focused = child.CurrentHasKeyboardFocus().unwrap_or(BOOL(0)).as_bool();
-
-            records.push(WindowInfoRecord {
-                info: WindowInfo {
-                    id,
-                    pid: root_pid,
-                    app_name: root_app_name.to_string(),
-                    title,
-                    x,
-                    y,
-                    z: sibling_count - index - 1,
-                    width,
-                    height,
-                    is_minimized: false,
-                    is_maximized: false,
-                    is_focused,
-                    children: Vec::new(),
-                },
-                parent_id: Some(parent_id),
-            });
+            }
 
             collect_children_recursive(
                 automation,
@@ -233,11 +270,12 @@ fn collect_children_recursive(
                 root_hwnd,
                 root_pid,
                 root_app_name,
-                id,
+                child_parent_id,
                 next_id,
                 used_ids,
                 visited,
                 records,
+                options,
                 depth + 1,
             )?;
         }
@@ -251,34 +289,73 @@ pub(super) fn collect_uia_children(
     parent_id: u32,
     root_pid: u32,
     root_app_name: &str,
+    options: &WindowQueryOptions,
     next_id: &mut u32,
     used_ids: &mut HashSet<u32>,
     records: &mut Vec<WindowInfoRecord>,
 ) -> XCapResult<usize> {
     let _com_guard = ComInitGuard::new()?;
+    let options = UiaQueryOptions::from(options);
 
     unsafe {
         let automation: IUIAutomation =
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
         let element = automation.ElementFromHandle(hwnd)?;
-        let start_len = records.len();
-        let mut visited = HashSet::new();
+        let base_next_id = *next_id;
+        let base_used_ids = used_ids.clone();
+        let deadline = options
+            .probe_timeout_ms
+            .filter(|timeout_ms| *timeout_ms > 0)
+            .map(|timeout_ms| Instant::now() + Duration::from_millis(timeout_ms));
+        let mut best_records = Vec::new();
+        let mut best_next_id = base_next_id;
+        let mut best_used_ids = base_used_ids.clone();
 
-        collect_children_recursive(
-            &automation,
-            &element,
-            hwnd,
-            root_pid,
-            root_app_name,
-            parent_id,
-            next_id,
-            used_ids,
-            &mut visited,
-            records,
-            0,
-        )?;
+        loop {
+            let mut attempt_records = Vec::new();
+            let mut attempt_next_id = base_next_id;
+            let mut attempt_used_ids = base_used_ids.clone();
+            let mut visited = HashSet::new();
 
-        Ok(records.len() - start_len)
+            collect_children_recursive(
+                &automation,
+                &element,
+                hwnd,
+                root_pid,
+                root_app_name,
+                parent_id,
+                &mut attempt_next_id,
+                &mut attempt_used_ids,
+                &mut visited,
+                &mut attempt_records,
+                options,
+                0,
+            )?;
+
+            if attempt_records.len() > best_records.len() {
+                best_records = attempt_records;
+                best_next_id = attempt_next_id;
+                best_used_ids = attempt_used_ids;
+            }
+
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    break;
+                }
+
+                sleep(Duration::from_millis(UIA_PROBE_INTERVAL_MS));
+                continue;
+            }
+
+            break;
+        }
+
+        *next_id = best_next_id;
+        *used_ids = best_used_ids;
+        let added = best_records.len();
+        records.extend(best_records);
+
+        Ok(added)
     }
 }
 
@@ -323,7 +400,28 @@ mod tests {
 
     #[test]
     fn test_uia_limits_are_positive() {
-        assert!(MAX_UIA_DEPTH > 0);
+        assert!(BASE_MAX_UIA_DEPTH > 0);
+        assert!(DEEP_MAX_UIA_DEPTH >= BASE_MAX_UIA_DEPTH);
         assert!(MAX_UIA_NODES_PER_WINDOW > 0);
+    }
+
+    #[test]
+    fn test_max_uia_depth_respects_deep_mode() {
+        assert_eq!(
+            max_uia_depth(UiaQueryOptions {
+                deep_children: false,
+                relaxed_filtering: false,
+                probe_timeout_ms: None,
+            }),
+            BASE_MAX_UIA_DEPTH
+        );
+        assert_eq!(
+            max_uia_depth(UiaQueryOptions {
+                deep_children: true,
+                relaxed_filtering: false,
+                probe_timeout_ms: Some(200),
+            }),
+            DEEP_MAX_UIA_DEPTH
+        );
     }
 }

@@ -453,7 +453,7 @@ fn collect_window_record(
     hwnd: HWND,
     parent_id: Option<u32>,
     z: i32,
-    include_children: bool,
+    options: &WindowQueryOptions,
     next_synthetic_id: &mut u32,
     used_ids: &mut HashSet<u32>,
     records: &mut Vec<WindowInfoRecord>,
@@ -483,7 +483,7 @@ fn collect_window_record(
         parent_id,
     });
 
-    if include_children {
+    if options.include_children {
         let children = child_hwnds(hwnd);
         let sibling_count = children.len() as i32;
 
@@ -493,6 +493,7 @@ fn collect_window_record(
                 id,
                 pid,
                 &app_name,
+                options,
                 next_synthetic_id,
                 used_ids,
                 records,
@@ -505,7 +506,7 @@ fn collect_window_record(
                     child,
                     Some(id),
                     sibling_count - index as i32 - 1,
-                    true,
+                    options,
                     next_synthetic_id,
                     used_ids,
                     records,
@@ -557,7 +558,7 @@ impl ImplWindow {
                 hwnd,
                 None,
                 root_count - index as i32 - 1,
-                options.include_children,
+                options,
                 &mut next_synthetic_id,
                 &mut used_ids,
                 &mut records,

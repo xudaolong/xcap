@@ -161,6 +161,9 @@ impl WindowSizeFilter {
 pub struct WindowQueryOptions {
     pub include_children: bool,
     pub size_filter: Option<WindowSizeFilter>,
+    pub deep_children: bool,
+    pub probe_timeout_ms: Option<u64>,
+    pub relaxed_filtering: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +309,9 @@ mod tests {
             &WindowQueryOptions {
                 include_children: true,
                 size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
             },
         );
 
@@ -335,6 +341,9 @@ mod tests {
             &WindowQueryOptions {
                 include_children: false,
                 size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
             },
         );
 
@@ -365,6 +374,9 @@ mod tests {
                     min_height: Some(400),
                     max_height: None,
                 }),
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
             },
         );
 
@@ -399,6 +411,9 @@ mod tests {
                     min_height: Some(300),
                     max_height: None,
                 }),
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
             },
         );
 
@@ -430,10 +445,27 @@ mod tests {
             &WindowQueryOptions {
                 include_children: true,
                 size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
             },
         );
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, 3);
+    }
+
+    #[test]
+    fn test_window_query_options_default_is_conservative() {
+        assert_eq!(
+            WindowQueryOptions::default(),
+            WindowQueryOptions {
+                include_children: false,
+                size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
+            }
+        );
     }
 }

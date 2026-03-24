@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_height: Some(200),
             max_height: None,
         }),
+        deep_children: true,
+        probe_timeout_ms: Some(300),
+        relaxed_filtering: true,
     };
 
     let windows = Window::query(options.clone())?;
