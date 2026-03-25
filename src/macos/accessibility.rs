@@ -17,9 +17,7 @@ const BASE_MAX_AX_DEPTH: usize = 6;
 const DEEP_MAX_AX_DEPTH: usize = 9;
 const MAX_AX_CHILDREN_PER_NODE: usize = 128;
 const MAX_AX_NODES_PER_WINDOW: usize = 1024;
-const BASE_CHILD_ATTRIBUTES: &[&str] = &["AXChildren"];
-const DEEP_CHILD_ATTRIBUTES: &[&str] = &[
-    "AXChildren",
+const DEEP_FALLBACK_CHILD_ATTRIBUTES: &[&str] = &[
     "AXContents",
     "AXVisibleChildren",
     "AXRows",
@@ -110,6 +108,7 @@ pub(super) struct AccessibilityApp {
 pub(super) struct AccessibilityQueryOptions {
     pub deep_children: bool,
     pub relaxed_filtering: bool,
+    pub include_descendants: bool,
 }
 
 pub(super) fn is_trusted() -> bool {
@@ -230,6 +229,7 @@ pub(super) fn debug_lines_for_window(
         AccessibilityQueryOptions {
             deep_children: true,
             relaxed_filtering: true,
+            include_descendants: true,
         },
         1,
         &mut visited,
@@ -354,6 +354,10 @@ fn collect_descendant_records(
             info,
             parent_id: Some(parent_id),
         });
+
+        if !options.include_descendants {
+            continue;
+        }
 
         collect_descendant_records(
             child_id,
@@ -611,22 +615,22 @@ fn max_ax_depth(options: AccessibilityQueryOptions) -> usize {
     }
 }
 
-fn child_attributes(options: AccessibilityQueryOptions) -> &'static [&'static str] {
-    if options.deep_children {
-        DEEP_CHILD_ATTRIBUTES
-    } else {
-        BASE_CHILD_ATTRIBUTES
-    }
-}
-
 fn ax_child_elements(
     element: &AXUIElement,
     options: AccessibilityQueryOptions,
 ) -> Vec<CFRetained<AXUIElement>> {
-    let mut children = Vec::new();
-    let mut seen = HashSet::new();
+    let mut children = ax_array_attribute_elements(element, "AXChildren");
 
-    for attribute in child_attributes(options) {
+    if !options.deep_children || !children.is_empty() {
+        return children;
+    }
+
+    let mut seen = children
+        .iter()
+        .map(|child| element_ptr_key(child))
+        .collect::<HashSet<_>>();
+
+    for attribute in DEEP_FALLBACK_CHILD_ATTRIBUTES {
         for child in ax_array_attribute_elements(element, attribute) {
             let key = element_ptr_key(&child);
             if seen.insert(key) {
@@ -778,10 +782,8 @@ mod tests {
 
     #[test]
     fn test_deep_child_attributes_extend_base_attributes() {
-        for attr in BASE_CHILD_ATTRIBUTES {
-            assert!(DEEP_CHILD_ATTRIBUTES.contains(attr));
-        }
-        assert!(DEEP_CHILD_ATTRIBUTES.len() > BASE_CHILD_ATTRIBUTES.len());
+        assert!(!DEEP_FALLBACK_CHILD_ATTRIBUTES.is_empty());
+        assert!(!DEEP_FALLBACK_CHILD_ATTRIBUTES.contains(&"AXChildren"));
     }
 
     #[test]
@@ -800,6 +802,7 @@ mod tests {
             max_ax_depth(AccessibilityQueryOptions {
                 deep_children: false,
                 relaxed_filtering: false,
+                include_descendants: false,
             }),
             BASE_MAX_AX_DEPTH
         );
@@ -807,6 +810,7 @@ mod tests {
             max_ax_depth(AccessibilityQueryOptions {
                 deep_children: true,
                 relaxed_filtering: false,
+                include_descendants: true,
             }),
             DEEP_MAX_AX_DEPTH
         );

@@ -15,7 +15,10 @@ use objc2_foundation::{NSNumber, NSString};
 use crate::{
     XCapError,
     error::XCapResult,
-    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+    window::{
+        WindowInfo, WindowInfoRecord, WindowQueryOptions, build_expanded_children,
+        build_window_info_tree,
+    },
 };
 
 use super::{accessibility, capture::capture, impl_monitor::ImplMonitor};
@@ -170,6 +173,44 @@ fn get_active_app_pid() -> Option<u32> {
 }
 
 impl ImplWindow {
+    fn snapshot_info(&self, focused_pid: Option<u32>) -> XCapResult<WindowInfo> {
+        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
+        let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
+        let pid =
+            get_cf_number_i32_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerPID")? as u32;
+        let app_name = get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerName")?;
+        let title = get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowName")?;
+        let is_on_screen = get_cf_bool_value(window_cf_dictionary.as_ref(), "kCGWindowIsOnscreen")?;
+
+        Ok(WindowInfo {
+            id: self.window_id,
+            pid,
+            app_name,
+            title,
+            x: cg_rect.origin.x as i32,
+            y: cg_rect.origin.y as i32,
+            z: self.z()?,
+            width: cg_rect.size.width as u32,
+            height: cg_rect.size.height as u32,
+            is_minimized: !is_on_screen && !self.is_maximized()?,
+            is_maximized: self.is_maximized()?,
+            is_focused: focused_pid == Some(pid),
+            children: Vec::new(),
+        })
+    }
+
+    fn snapshots() -> XCapResult<Vec<WindowInfo>> {
+        let impl_windows = Self::all()?;
+        let focused_pid = get_active_app_pid();
+        let mut snapshots = Vec::with_capacity(impl_windows.len());
+
+        for impl_window in impl_windows {
+            snapshots.push(impl_window.snapshot_info(focused_pid)?);
+        }
+
+        Ok(snapshots)
+    }
+
     pub fn new(window_id: u32) -> ImplWindow {
         ImplWindow { window_id }
     }
@@ -219,40 +260,7 @@ impl ImplWindow {
     }
 
     pub fn query(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
-        let impl_windows = Self::all()?;
-        let focused_pid = get_active_app_pid();
-        let mut snapshots = Vec::with_capacity(impl_windows.len());
-
-        for impl_window in impl_windows {
-            let window_cf_dictionary = get_window_cf_dictionary(impl_window.window_id)?;
-            let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-            let pid =
-                get_cf_number_i32_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerPID")? as u32;
-            let app_name =
-                get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerName")?;
-            let title = get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowName")?;
-            let is_on_screen =
-                get_cf_bool_value(window_cf_dictionary.as_ref(), "kCGWindowIsOnscreen")?;
-
-            let info = WindowInfo {
-                id: impl_window.window_id,
-                pid,
-                app_name,
-                title,
-                x: cg_rect.origin.x as i32,
-                y: cg_rect.origin.y as i32,
-                z: impl_window.z()?,
-                width: cg_rect.size.width as u32,
-                height: cg_rect.size.height as u32,
-                is_minimized: !is_on_screen && !impl_window.is_maximized()?,
-                is_maximized: impl_window.is_maximized()?,
-                is_focused: focused_pid == Some(pid),
-                children: Vec::new(),
-            };
-
-            snapshots.push(info);
-        }
-
+        let snapshots = Self::snapshots()?;
         let mut records = snapshots
             .iter()
             .cloned()
@@ -280,6 +288,7 @@ impl ImplWindow {
                         accessibility::AccessibilityQueryOptions {
                             deep_children: options.deep_children,
                             relaxed_filtering: options.relaxed_filtering,
+                            include_descendants: true,
                         },
                         &mut next_id,
                     ));
@@ -288,6 +297,56 @@ impl ImplWindow {
         }
 
         Ok(build_window_info_tree(records, options))
+    }
+
+    pub fn query_roots(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let mut root_options = options.clone();
+        root_options.include_children = false;
+        Self::query(&root_options)
+    }
+
+    pub fn expand_children(
+        window_id: u32,
+        options: &WindowQueryOptions,
+    ) -> XCapResult<Vec<WindowInfo>> {
+        let snapshots = Self::snapshots()?;
+        let Some(root) = snapshots
+            .iter()
+            .find(|window| window.id == window_id)
+            .cloned()
+        else {
+            return Err(XCapError::new(format!("Window {window_id} not found")));
+        };
+
+        let mut next_id = snapshots
+            .iter()
+            .map(|info| info.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(0x8000_0000);
+        let app = if accessibility::is_trusted() {
+            accessibility::application(root.pid)
+        } else {
+            None
+        };
+        let descendants = app
+            .as_ref()
+            .map(|app| {
+                accessibility::descendant_records_for_window(
+                    &root,
+                    app,
+                    accessibility::AccessibilityQueryOptions {
+                        deep_children: options.deep_children,
+                        relaxed_filtering: options.relaxed_filtering,
+                        include_descendants: options.include_children,
+                    },
+                    &mut next_id,
+                )
+            })
+            .unwrap_or_default();
+
+        Ok(build_expanded_children(root, descendants, options))
     }
 
     pub fn debug_macos_accessibility(options: &WindowQueryOptions) -> XCapResult<Vec<String>> {

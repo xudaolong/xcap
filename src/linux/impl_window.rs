@@ -10,7 +10,10 @@ use xcb::{
 
 use crate::{
     error::{XCapError, XCapResult},
-    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+    window::{
+        WindowInfo, WindowInfoRecord, WindowQueryOptions, build_expanded_children,
+        build_window_info_tree,
+    },
 };
 
 use super::{
@@ -195,9 +198,46 @@ impl ImplWindow {
 
         Ok(build_window_info_tree(records, options))
     }
+
+    pub fn query_roots(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let mut root_options = options.clone();
+        root_options.include_children = false;
+        Self::query(&root_options)
+    }
+
+    pub fn expand_children(
+        window_id: u32,
+        options: &WindowQueryOptions,
+    ) -> XCapResult<Vec<WindowInfo>> {
+        let root = Self::all()?
+            .into_iter()
+            .find(|window| window.id().ok() == Some(window_id))
+            .ok_or_else(|| XCapError::new(format!("Window {window_id} not found")))?
+            .window_info()?;
+
+        Ok(build_expanded_children(root, Vec::new(), options))
+    }
 }
 
 impl ImplWindow {
+    fn window_info(&self) -> XCapResult<WindowInfo> {
+        Ok(WindowInfo {
+            id: self.id()?,
+            pid: self.pid()?,
+            app_name: self.app_name()?,
+            title: self.title()?,
+            x: self.x()?,
+            y: self.y()?,
+            z: self.z()?,
+            width: self.width()?,
+            height: self.height()?,
+            is_minimized: self.is_minimized()?,
+            is_maximized: self.is_maximized()?,
+            is_focused: self.is_focused()?,
+            children: Vec::new(),
+        })
+    }
+
     pub fn id(&self) -> XCapResult<u32> {
         Ok(self.window.resource_id())
     }

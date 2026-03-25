@@ -38,8 +38,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         relaxed_filtering: true,
     };
 
-    let windows = Window::query(options.clone())?;
+    let roots = Window::query_roots(options.clone())?;
 
+    println!("== roots ==");
+    print_window_tree(&roots, 0);
+
+    if let Some(root) = roots.first() {
+        println!(
+            "\n== expanded children for root id={} title={:?} ==",
+            root.id, root.title
+        );
+        let expanded = Window::expand_children(root.id, options.clone())?;
+        print_window_tree(&expanded, 1);
+    }
+
+    println!("\n== full query ==");
+    let windows = Window::query(options.clone())?;
     print_window_tree(&windows, 0);
 
     #[cfg(target_os = "macos")]

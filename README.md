@@ -232,7 +232,7 @@ fn print_window_tree(windows: &[xcap::WindowInfo], depth: usize) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let windows = Window::query(WindowQueryOptions {
+    let options = WindowQueryOptions {
         include_children: true,
         size_filter: Some(WindowSizeFilter {
             min_width: Some(300),
@@ -243,7 +243,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         deep_children: true,
         probe_timeout_ms: Some(300),
         relaxed_filtering: true,
-    })?;
+    };
+
+    let roots = Window::query_roots(options.clone())?;
+
+    if let Some(root) = roots.first() {
+        let children = Window::expand_children(root.id, options.clone())?;
+        println!("expanded {} child nodes for {:?}", children.len(), root.title);
+    }
+
+    let windows = Window::query(options)?;
 
     print_window_tree(&windows, 0);
 
@@ -257,6 +266,8 @@ The returned `WindowInfo` includes:
 -   `x`, `y`, `z`, `width`, `height`
 -   `is_minimized`, `is_maximized`, `is_focused`
 -   `children` for nested sub-window structure
+-   `Window::query_roots(...)` for fast top-level window loading
+-   `Window::expand_children(window_id, ...)` for progressive child expansion
 
 To inspect why `children` may still be empty on macOS or Windows, run:
 

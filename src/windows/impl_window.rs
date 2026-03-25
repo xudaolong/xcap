@@ -30,7 +30,10 @@ use windows::{
 
 use crate::{
     error::XCapResult,
-    window::{WindowInfo, WindowInfoRecord, WindowQueryOptions, build_window_info_tree},
+    window::{
+        WindowInfo, WindowInfoRecord, WindowQueryOptions, build_expanded_children,
+        build_window_info_tree,
+    },
 };
 
 use super::{
@@ -519,6 +522,24 @@ fn collect_window_record(
 }
 
 impl ImplWindow {
+    fn window_info(&self) -> XCapResult<WindowInfo> {
+        Ok(WindowInfo {
+            id: self.id()?,
+            pid: self.pid()?,
+            app_name: self.app_name()?,
+            title: self.title()?,
+            x: self.x()?,
+            y: self.y()?,
+            z: self.z()?,
+            width: self.width()?,
+            height: self.height()?,
+            is_minimized: self.is_minimized()?,
+            is_maximized: self.is_maximized()?,
+            is_focused: self.is_focused()?,
+            children: Vec::new(),
+        })
+    }
+
     fn new(hwnd: HWND) -> ImplWindow {
         ImplWindow { hwnd }
     }
@@ -566,6 +587,54 @@ impl ImplWindow {
         }
 
         Ok(build_window_info_tree(records, options))
+    }
+
+    pub fn query_roots(options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        let mut root_options = options.clone();
+        root_options.include_children = false;
+        Self::query(&root_options)
+    }
+
+    pub fn expand_children(
+        window_id: u32,
+        options: &WindowQueryOptions,
+    ) -> XCapResult<Vec<WindowInfo>> {
+        let hwnd = HWND(window_id as usize as *mut c_void);
+        let root = ImplWindow::new(hwnd).window_info()?;
+        let mut records = Vec::new();
+        let mut next_synthetic_id = root.id.saturating_add(1).max(0x8000_0000);
+        let mut used_ids = HashSet::from([root.id]);
+        let children = child_hwnds(hwnd);
+
+        if children.is_empty() {
+            if let Err(err) = collect_uia_children(
+                hwnd,
+                root.id,
+                root.pid,
+                &root.app_name,
+                options,
+                &mut next_synthetic_id,
+                &mut used_ids,
+                &mut records,
+            ) {
+                log::debug!("collect_uia_children failed for {:?}: {err}", hwnd);
+            }
+        } else {
+            let sibling_count = children.len() as i32;
+            for (index, child) in children.into_iter().enumerate() {
+                collect_window_record(
+                    child,
+                    Some(root.id),
+                    sibling_count - index as i32 - 1,
+                    options,
+                    &mut next_synthetic_id,
+                    &mut used_ids,
+                    &mut records,
+                )?;
+            }
+        }
+
+        Ok(build_expanded_children(root, records, options))
     }
 
     pub fn debug_windows_children(options: &WindowQueryOptions) -> XCapResult<Vec<String>> {

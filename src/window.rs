@@ -30,6 +30,19 @@ impl Window {
         ImplWindow::query(&options)
     }
 
+    /// Query top-level windows without resolving child trees.
+    pub fn query_roots(options: WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        ImplWindow::query_roots(&options)
+    }
+
+    /// Expand a specific window's child tree on demand.
+    pub fn expand_children(
+        window_id: u32,
+        options: WindowQueryOptions,
+    ) -> XCapResult<Vec<WindowInfo>> {
+        ImplWindow::expand_children(window_id, &options)
+    }
+
     #[cfg(target_os = "macos")]
     pub fn debug_macos_accessibility(options: WindowQueryOptions) -> XCapResult<Vec<String>> {
         ImplWindow::debug_macos_accessibility(&options)
@@ -265,6 +278,41 @@ pub(crate) fn build_window_info_tree(
         .collect()
 }
 
+pub(crate) fn build_expanded_children(
+    root: WindowInfo,
+    descendants: Vec<WindowInfoRecord>,
+    options: &WindowQueryOptions,
+) -> Vec<WindowInfo> {
+    let root_id = root.id;
+    let mut records = Vec::with_capacity(descendants.len() + 1);
+    records.push(WindowInfoRecord {
+        info: root,
+        parent_id: None,
+    });
+    records.extend(descendants);
+
+    let mut tree_options = options.clone();
+    tree_options.include_children = true;
+
+    let mut children = build_window_info_tree(records, &tree_options)
+        .into_iter()
+        .find(|node| node.id == root_id)
+        .map(|node| node.children)
+        .unwrap_or_default();
+
+    if !options.include_children {
+        clear_nested_children(&mut children);
+    }
+
+    children
+}
+
+fn clear_nested_children(nodes: &mut [WindowInfo]) {
+    for node in nodes {
+        node.children.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +515,48 @@ mod tests {
                 relaxed_filtering: false,
             }
         );
+    }
+
+    #[test]
+    fn test_build_expanded_children_respects_include_children() {
+        let root = window_info(1, 800, 600);
+        let descendants = vec![
+            WindowInfoRecord {
+                info: window_info(2, 400, 300),
+                parent_id: Some(1),
+            },
+            WindowInfoRecord {
+                info: window_info(3, 200, 100),
+                parent_id: Some(2),
+            },
+        ];
+
+        let flat_children = build_expanded_children(
+            root.clone(),
+            descendants.clone(),
+            &WindowQueryOptions {
+                include_children: false,
+                size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
+            },
+        );
+        assert_eq!(flat_children.len(), 1);
+        assert!(flat_children[0].children.is_empty());
+
+        let tree_children = build_expanded_children(
+            root,
+            descendants,
+            &WindowQueryOptions {
+                include_children: true,
+                size_filter: None,
+                deep_children: false,
+                probe_timeout_ms: None,
+                relaxed_filtering: false,
+            },
+        );
+        assert_eq!(tree_children.len(), 1);
+        assert_eq!(tree_children[0].children.len(), 1);
     }
 }

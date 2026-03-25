@@ -232,7 +232,7 @@ fn print_window_tree(windows: &[xcap::WindowInfo], depth: usize) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let windows = Window::query(WindowQueryOptions {
+    let options = WindowQueryOptions {
         include_children: true,
         size_filter: Some(WindowSizeFilter {
             min_width: Some(300),
@@ -243,7 +243,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         deep_children: true,
         probe_timeout_ms: Some(300),
         relaxed_filtering: true,
-    })?;
+    };
+
+    let roots = Window::query_roots(options.clone())?;
+
+    if let Some(root) = roots.first() {
+        let children = Window::expand_children(root.id, options.clone())?;
+        println!("expanded {} child nodes for {:?}", children.len(), root.title);
+    }
+
+    let windows = Window::query(options)?;
 
     print_window_tree(&windows, 0);
 
@@ -257,6 +266,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 -   `x`、`y`、`z`、`width`、`height`
 -   `is_minimized`、`is_maximized`、`is_focused`
 -   `children`，用于表示嵌套的子窗口结构
+-   `Window::query_roots(...)`，用于快速加载顶层窗口
+-   `Window::expand_children(window_id, ...)`，用于按需渐进展开子节点
 
 如果想排查 macOS 或 Windows 下为什么 `children` 仍然为空，可以运行：
 

@@ -34,6 +34,7 @@ struct UiaQueryOptions {
     deep_children: bool,
     relaxed_filtering: bool,
     probe_timeout_ms: Option<u64>,
+    include_descendants: bool,
 }
 
 impl From<&WindowQueryOptions> for UiaQueryOptions {
@@ -42,6 +43,7 @@ impl From<&WindowQueryOptions> for UiaQueryOptions {
             deep_children: options.deep_children,
             relaxed_filtering: options.relaxed_filtering,
             probe_timeout_ms: options.probe_timeout_ms,
+            include_descendants: options.include_children,
         }
     }
 }
@@ -261,6 +263,10 @@ fn collect_children_recursive(
 
                 child_parent_id = id;
             } else if !options.deep_children {
+                continue;
+            }
+
+            if !options.include_descendants {
                 continue;
             }
 

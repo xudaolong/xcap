@@ -97,6 +97,17 @@ impl ImplWindow {
         Err(XCapError::NotSupported)
     }
 
+    pub fn query_roots(_options: &WindowQueryOptions) -> XCapResult<Vec<WindowInfo>> {
+        Err(XCapError::NotSupported)
+    }
+
+    pub fn expand_children(
+        _window_id: u32,
+        _options: &WindowQueryOptions,
+    ) -> XCapResult<Vec<WindowInfo>> {
+        Err(XCapError::NotSupported)
+    }
+
     pub fn id(&self) -> XCapResult<u32> {
         Err(XCapError::NotSupported)
     }
