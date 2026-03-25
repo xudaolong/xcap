@@ -13,9 +13,22 @@ use crate::window::{WindowInfo, WindowInfoRecord};
 const AX_ERROR_SUCCESS: i32 = 0;
 const AX_VALUE_TYPE_CGPOINT: u32 = 1;
 const AX_VALUE_TYPE_CGSIZE: u32 = 2;
-const MAX_AX_DEPTH: usize = 6;
+const BASE_MAX_AX_DEPTH: usize = 6;
+const DEEP_MAX_AX_DEPTH: usize = 9;
 const MAX_AX_CHILDREN_PER_NODE: usize = 128;
 const MAX_AX_NODES_PER_WINDOW: usize = 1024;
+const BASE_CHILD_ATTRIBUTES: &[&str] = &["AXChildren"];
+const DEEP_CHILD_ATTRIBUTES: &[&str] = &[
+    "AXChildren",
+    "AXContents",
+    "AXVisibleChildren",
+    "AXRows",
+    "AXColumns",
+    "AXTabs",
+    "AXToolbar",
+    "AXSheets",
+    "AXDrawer",
+];
 
 #[derive(Debug)]
 #[repr(C)]
@@ -93,6 +106,12 @@ pub(super) struct AccessibilityApp {
     focused_element_ptr: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AccessibilityQueryOptions {
+    pub deep_children: bool,
+    pub relaxed_filtering: bool,
+}
+
 pub(super) fn is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
@@ -131,6 +150,7 @@ pub(super) fn application(pid: u32) -> Option<AccessibilityApp> {
 pub(super) fn descendant_records_for_window(
     root: &WindowInfo,
     app: &AccessibilityApp,
+    options: AccessibilityQueryOptions,
     next_id: &mut u32,
 ) -> Vec<WindowInfoRecord> {
     let Some(window) = match_window(root, app) else {
@@ -147,6 +167,7 @@ pub(super) fn descendant_records_for_window(
         root.pid,
         &root.app_name,
         app.focused_element_ptr,
+        options,
         0,
         &mut visited,
         &mut visited_count,
@@ -206,6 +227,10 @@ pub(super) fn debug_lines_for_window(
     let mut visited_count = 1usize;
     collect_debug_descendant_lines(
         &window.element,
+        AccessibilityQueryOptions {
+            deep_children: true,
+            relaxed_filtering: true,
+        },
         1,
         &mut visited,
         &mut visited_count,
@@ -272,17 +297,18 @@ fn collect_descendant_records(
     pid: u32,
     app_name: &str,
     focused_element_ptr: Option<usize>,
+    options: AccessibilityQueryOptions,
     depth: usize,
     visited: &mut HashSet<usize>,
     visited_count: &mut usize,
     next_id: &mut u32,
     records: &mut Vec<WindowInfoRecord>,
 ) {
-    if depth >= MAX_AX_DEPTH || *visited_count >= MAX_AX_NODES_PER_WINDOW {
+    if depth >= max_ax_depth(options) || *visited_count >= MAX_AX_NODES_PER_WINDOW {
         return;
     }
 
-    let children = ax_array_attribute_elements(parent_element, "AXChildren");
+    let children = ax_child_elements(parent_element, options);
     let sibling_count = children.len() as i32;
 
     for (index, child) in children.into_iter().enumerate() {
@@ -302,7 +328,23 @@ fn collect_descendant_records(
             app_name,
             sibling_count - index as i32 - 1,
             focused_element_ptr,
+            options,
         ) else {
+            if options.deep_children {
+                collect_descendant_records(
+                    parent_id,
+                    &child,
+                    pid,
+                    app_name,
+                    focused_element_ptr,
+                    options,
+                    depth + 1,
+                    visited,
+                    visited_count,
+                    next_id,
+                    records,
+                );
+            }
             continue;
         };
 
@@ -319,6 +361,7 @@ fn collect_descendant_records(
             pid,
             app_name,
             focused_element_ptr,
+            options,
             depth + 1,
             visited,
             visited_count,
@@ -330,16 +373,17 @@ fn collect_descendant_records(
 
 fn collect_debug_descendant_lines(
     element: &AXUIElement,
+    options: AccessibilityQueryOptions,
     depth: usize,
     visited: &mut HashSet<usize>,
     visited_count: &mut usize,
     lines: &mut Vec<String>,
 ) {
-    if depth > MAX_AX_DEPTH || *visited_count >= MAX_AX_NODES_PER_WINDOW {
+    if depth > max_ax_depth(options) || *visited_count >= MAX_AX_NODES_PER_WINDOW {
         return;
     }
 
-    for child in ax_array_attribute_elements(element, "AXChildren") {
+    for child in ax_child_elements(element, options) {
         let child_ptr = element_ptr_key(&child);
         if !visited.insert(child_ptr) {
             lines.push(format!(
@@ -382,7 +426,7 @@ fn collect_debug_descendant_lines(
             minimized
         ));
 
-        collect_debug_descendant_lines(&child, depth + 1, visited, visited_count, lines);
+        collect_debug_descendant_lines(&child, options, depth + 1, visited, visited_count, lines);
     }
 }
 
@@ -393,6 +437,7 @@ fn build_ax_info(
     app_name: &str,
     z: i32,
     focused_element_ptr: Option<usize>,
+    options: AccessibilityQueryOptions,
 ) -> Option<WindowInfo> {
     let title = ax_display_title(element);
     let role = ax_string_attribute(element, "AXRole").unwrap_or_default();
@@ -403,6 +448,10 @@ fn build_ax_info(
     let has_label = !title.is_empty() || !role.is_empty();
 
     if !has_geometry && !has_label {
+        return None;
+    }
+
+    if !options.relaxed_filtering && !has_geometry {
         return None;
     }
 
@@ -554,6 +603,41 @@ fn ax_array_attribute_elements(
     elements
 }
 
+fn max_ax_depth(options: AccessibilityQueryOptions) -> usize {
+    if options.deep_children {
+        DEEP_MAX_AX_DEPTH
+    } else {
+        BASE_MAX_AX_DEPTH
+    }
+}
+
+fn child_attributes(options: AccessibilityQueryOptions) -> &'static [&'static str] {
+    if options.deep_children {
+        DEEP_CHILD_ATTRIBUTES
+    } else {
+        BASE_CHILD_ATTRIBUTES
+    }
+}
+
+fn ax_child_elements(
+    element: &AXUIElement,
+    options: AccessibilityQueryOptions,
+) -> Vec<CFRetained<AXUIElement>> {
+    let mut children = Vec::new();
+    let mut seen = HashSet::new();
+
+    for attribute in child_attributes(options) {
+        for child in ax_array_attribute_elements(element, attribute) {
+            let key = element_ptr_key(&child);
+            if seen.insert(key) {
+                children.push(child);
+            }
+        }
+    }
+
+    children
+}
+
 pub(super) fn element_ptr_key(element: &AXUIElement) -> usize {
     element as *const AXUIElement as usize
 }
@@ -693,6 +777,14 @@ mod tests {
     }
 
     #[test]
+    fn test_deep_child_attributes_extend_base_attributes() {
+        for attr in BASE_CHILD_ATTRIBUTES {
+            assert!(DEEP_CHILD_ATTRIBUTES.contains(attr));
+        }
+        assert!(DEEP_CHILD_ATTRIBUTES.len() > BASE_CHILD_ATTRIBUTES.len());
+    }
+
+    #[test]
     fn test_next_synthetic_id_is_unique() {
         let mut next_id = 0x8000_0000;
         let first = next_synthetic_id(&mut next_id);
@@ -700,5 +792,23 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn test_max_ax_depth_respects_query_options() {
+        assert_eq!(
+            max_ax_depth(AccessibilityQueryOptions {
+                deep_children: false,
+                relaxed_filtering: false,
+            }),
+            BASE_MAX_AX_DEPTH
+        );
+        assert_eq!(
+            max_ax_depth(AccessibilityQueryOptions {
+                deep_children: true,
+                relaxed_filtering: false,
+            }),
+            DEEP_MAX_AX_DEPTH
+        );
     }
 }

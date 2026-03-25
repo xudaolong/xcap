@@ -277,6 +277,10 @@ impl ImplWindow {
                     records.extend(accessibility::descendant_records_for_window(
                         snapshot,
                         app,
+                        accessibility::AccessibilityQueryOptions {
+                            deep_children: options.deep_children,
+                            relaxed_filtering: options.relaxed_filtering,
+                        },
                         &mut next_id,
                     ));
                 }
