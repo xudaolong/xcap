@@ -85,12 +85,12 @@ impl ScreenCast<'_> {
     }
 
     pub fn create_session(&self) -> XCapResult<OwnedObjectPath> {
-        let conn = get_zbus_connection()?;
+        let conn = self.proxy.connection();
 
         let mut options = HashMap::new();
 
         let handle_token = rand::random::<u32>().to_string();
-        let portal_request = get_zbus_portal_request(&conn, &handle_token)?;
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
 
         options.insert("handle_token", Value::from(&handle_token));
 
@@ -120,12 +120,12 @@ impl ScreenCast<'_> {
     }
 
     pub fn select_sources(&self, session: &OwnedObjectPath) -> XCapResult<()> {
-        let conn = get_zbus_connection()?;
+        let conn = self.proxy.connection();
 
         let mut options = HashMap::new();
 
         let handle_token = rand::random::<u32>().to_string();
-        let portal_request = get_zbus_portal_request(&conn, &handle_token)?;
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
 
         options.insert("handle_token", Value::from(handle_token));
         options.insert("types", Value::from(1_u32));
@@ -140,12 +140,12 @@ impl ScreenCast<'_> {
     }
 
     pub fn start(&self, session: &OwnedObjectPath) -> XCapResult<ScreenCastStartResponse> {
-        let conn = get_zbus_connection()?;
+        let conn = self.proxy.connection();
 
         let mut options = HashMap::new();
 
         let handle_token = rand::random::<u32>().to_string();
-        let portal_request = get_zbus_portal_request(&conn, &handle_token)?;
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
 
         options.insert("handle_token", Value::from(&handle_token));
 
@@ -292,8 +292,11 @@ impl WaylandVideoRecorder {
                                     VideoFormat::RGB => {
                                         let mut buf =
                                             vec![0; (size.width * size.height * 4) as usize];
-                                        for (src, dst) in
-                                            frame_data.chunks_exact(3).zip(buf.chunks_exact_mut(4))
+                                        for (src, dst) in frame_data
+                                            .as_chunks::<3>()
+                                            .0
+                                            .iter()
+                                            .zip(buf.as_chunks_mut::<4>().0)
                                         {
                                             dst[0] = src[0];
                                             dst[1] = src[1];
@@ -307,7 +310,7 @@ impl WaylandVideoRecorder {
                                     VideoFormat::RGBx => frame_data.to_vec(),
                                     VideoFormat::BGRx => {
                                         let mut buf = frame_data.to_vec();
-                                        for src in buf.chunks_exact_mut(4) {
+                                        for src in buf.as_chunks_mut::<4>().0 {
                                             src.swap(0, 2);
                                         }
 
