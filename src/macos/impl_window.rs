@@ -7,8 +7,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGDisplayBounds, CGMainDisplayID, CGPreflightScreenCaptureAccess, CGRectContainsPoint,
-    CGRectIntersectsRect, CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo,
-    CGWindowListOption,
+    CGRectIntersectsRect, CGRectMakeWithDictionaryRepresentation, CGWindowImageOption,
+    CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -533,6 +533,7 @@ impl ImplWindow {
             cg_rect,
             CGWindowListOption::OptionIncludingWindow,
             self.window_id,
+            CGWindowImageOption::Default,
         )
     }
 }

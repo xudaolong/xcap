@@ -7,7 +7,8 @@ use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsActive,
     CGDisplayIsBuiltin, CGDisplayIsMain, CGDisplayMode, CGDisplayModelNumber, CGDisplayRotation,
-    CGError, CGGetActiveDisplayList, CGGetDisplaysWithPoint, CGWindowListOption,
+    CGError, CGGetActiveDisplayList, CGGetDisplaysWithPoint, CGWindowImageOption,
+    CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -205,7 +206,12 @@ impl ImplMonitor {
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
         let cg_rect = CGDisplayBounds(self.cg_direct_display_id);
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture(
+            cg_rect,
+            CGWindowListOption::OptionOnScreenOnly,
+            0,
+            CGWindowImageOption::ShouldBeOpaque,
+        )
     }
 
     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
@@ -238,7 +244,12 @@ impl ImplMonitor {
             },
         };
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture(
+            cg_rect,
+            CGWindowListOption::OptionOnScreenOnly,
+            0,
+            CGWindowImageOption::ShouldBeOpaque,
+        )
     }
 
     pub fn video_recorder(&self) -> XCapResult<(ImplVideoRecorder, Receiver<Frame>)> {
