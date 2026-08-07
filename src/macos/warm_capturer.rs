@@ -12,6 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 use objc2::{
@@ -41,6 +42,8 @@ struct LatestFrame {
     width: u32,
     height: u32,
     raw: Vec<u8>,
+    /// 帧采集时间（delegate 写入时记录），供新鲜度校验；无帧时为 None
+    captured_at: Option<Instant>,
 }
 
 /// Delegate 内部状态：最新帧 + 运行标志 + 帧序号
@@ -132,6 +135,7 @@ define_class!(
             latest.width = width as u32;
             latest.height = height as u32;
             latest.raw = raw;
+            latest.captured_at = Some(Instant::now());
             self.ivars().seq.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -198,8 +202,8 @@ impl WarmCapturer {
             )
             .ok_or_else(|| XCapError::new("AVCaptureScreenInput::initWithDisplayID failed"))?;
             input.setCapturesCursor(true);
-            // 闲时 10fps：足够新鲜，同时省电省 CPU
-            let min_frame_duration = CMTime::new(1, 10);
+            // 30fps：足够新鲜（每帧 ~33ms），省电与新鲜度折中
+            let min_frame_duration = CMTime::new(1, 30);
             let _: () = msg_send![&input, setMinFrameDuration: min_frame_duration];
 
             if session.canAddInput(&input) {
@@ -290,5 +294,33 @@ impl WarmCapturer {
     /// 当前帧序号（用于判断缓存是否刷新）
     pub fn frame_seq(&self) -> u64 {
         self.seq.load(Ordering::Relaxed)
+    }
+
+    /// 等待一帧「比进入时更新」的帧（AVCaptureScreenInput 按最小帧间隔持续出帧）。
+    /// 最多等 `timeout`，期间流停止或无新帧则尽早返回当前缓存。
+    /// 返回 `(是否拿到新帧, 最新帧)`；最新帧可能为空（流尚未出过帧）。
+    pub fn wait_fresh_frame(&self, timeout: Duration) -> (bool, Option<RgbaImage>) {
+        let seq0 = self.frame_seq();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.frame_seq() > seq0 {
+                let frame = self.latest_frame();
+                return (true, frame);
+            }
+            if !self.running.load(Ordering::Acquire) {
+                // 流已停止，不再等新帧
+                return (false, self.latest_frame());
+            }
+            if Instant::now() >= deadline {
+                return (false, self.latest_frame());
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+
+    /// 最新帧的采集时间（用于 age 校验）
+    pub fn latest_frame_age(&self) -> Option<Duration> {
+        let latest = self.latest.lock().ok()?;
+        latest.captured_at.map(|t| t.elapsed())
     }
 }

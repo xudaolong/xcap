@@ -1,5 +1,6 @@
 use std::sync::mpsc::Receiver;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use image::RgbaImage;
 use objc2::MainThreadMarker;
@@ -66,6 +67,9 @@ pub fn warm_capture_latest_frame() -> XCapResult<Option<RgbaImage>> {
     let guard = WARM_CAPTURER.lock()?;
     Ok(guard.as_ref().and_then(|c| c.latest_frame()))
 }
+
+/// 预热流帧允许的最大年龄：超过则视为 stale，走 CG 同步截屏保底准确
+const WARM_FRAME_MAX_AGE: Duration = Duration::from_millis(150);
 
 impl ImplMonitor {
     pub fn warm_capture_start(&self) -> XCapResult<bool> {
@@ -261,12 +265,25 @@ impl ImplMonitor {
     }
 
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
-        // 优先读预热流的最新帧（~1ms）——仅当流跟踪的就是本显示器时；
-        // 否则会拿到其他显示器的帧。CG 路径作 fallback。
+        // 优先用预热流：等一帧「新帧」再取，避免返回陈旧画面；
+        // 等待超时或帧过旧时 fallback 到 CG 同步截屏（保证准确）。
         let warm_display = *WARM_DISPLAY_ID.lock()?;
         if warm_display == Some(self.cg_direct_display_id) {
-            if let Some(image) = warm_capture_latest_frame()? {
-                return Ok(image);
+            if let Some(capturer) = WARM_CAPTURER.lock()?.as_ref() {
+                let (fresh, image) = capturer.wait_fresh_frame(Duration::from_millis(100));
+                if let Some(image) = image {
+                    let age_ok = capturer
+                        .latest_frame_age()
+                        .map(|age| age <= WARM_FRAME_MAX_AGE)
+                        .unwrap_or(false);
+                    if fresh && age_ok {
+                        return Ok(image);
+                    }
+                    if !fresh && age_ok {
+                        // 等待超时（流未出新帧），但缓存帧仍新鲜，可用
+                        return Ok(image);
+                    }
+                }
             }
         }
 
