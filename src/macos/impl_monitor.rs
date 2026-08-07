@@ -1,4 +1,5 @@
 use std::sync::mpsc::Receiver;
+use std::sync::{LazyLock, Mutex};
 
 use image::RgbaImage;
 use objc2::MainThreadMarker;
@@ -17,11 +18,67 @@ use crate::{
     video_recorder::Frame,
 };
 
-use super::{capture::capture, impl_video_recorder::ImplVideoRecorder};
+use super::{capture::capture, impl_video_recorder::ImplVideoRecorder, warm_capturer::WarmCapturer};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImplMonitor {
     pub cg_direct_display_id: CGDirectDisplayID,
+}
+
+/// 常驻预热捕获流（同一时间只跟踪一块显示器）。
+/// 由 CodeExpander 启动时/截图会话开始时调用 warm_capture_start 建立；
+/// `capture_image` 优先读 warm 流的最新帧，避免每次 CGWindowListCreateImage 的冷启动开销。
+static WARM_CAPTURER: LazyLock<Mutex<Option<WarmCapturer>>> =
+    LazyLock::new(|| Mutex::new(None));
+static WARM_DISPLAY_ID: Mutex<Option<CGDirectDisplayID>> = Mutex::new(None);
+
+/// 启动/切换预热捕获流。同一时间只保留一块显示器。
+/// 返回 false 表示该显示器已有流（无需重建）。
+pub fn warm_capture_start(display_id: CGDirectDisplayID) -> XCapResult<bool> {
+    let current = *WARM_DISPLAY_ID.lock()?;
+    if current == Some(display_id) {
+        if let Some(capturer) = WARM_CAPTURER.lock()?.as_ref() {
+            let _ = capturer.start();
+            return Ok(false);
+        }
+    }
+
+    let capturer = WarmCapturer::new(display_id)?;
+    capturer.start()?;
+    let mut guard = WARM_CAPTURER.lock()?;
+    *guard = Some(capturer);
+    *WARM_DISPLAY_ID.lock()? = Some(display_id);
+    Ok(true)
+}
+
+/// 停止预热捕获流（例如长时间未截屏时释放资源）
+pub fn warm_capture_stop() -> XCapResult<()> {
+    let mut guard = WARM_CAPTURER.lock()?;
+    if let Some(capturer) = guard.as_ref() {
+        let _ = capturer.stop();
+    }
+    *guard = None;
+    Ok(())
+}
+
+/// 读取预热流的最新一帧（若有）
+pub fn warm_capture_latest_frame() -> XCapResult<Option<RgbaImage>> {
+    let guard = WARM_CAPTURER.lock()?;
+    Ok(guard.as_ref().and_then(|c| c.latest_frame()))
+}
+
+impl ImplMonitor {
+    pub fn warm_capture_start(&self) -> XCapResult<bool> {
+        warm_capture_start(self.cg_direct_display_id)
+    }
+
+    pub fn warm_capture_stop(&self) -> XCapResult<()> {
+        warm_capture_stop()
+    }
+
+    pub fn warm_capture_latest_frame(&self) -> XCapResult<Option<RgbaImage>> {
+        warm_capture_latest_frame()
+    }
 }
 
 fn get_display_friendly_name(display_id: CGDirectDisplayID) -> XCapResult<String> {
@@ -204,6 +261,15 @@ impl ImplMonitor {
     }
 
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
+        // 优先读预热流的最新帧（~1ms）——仅当流跟踪的就是本显示器时；
+        // 否则会拿到其他显示器的帧。CG 路径作 fallback。
+        let warm_display = *WARM_DISPLAY_ID.lock()?;
+        if warm_display == Some(self.cg_direct_display_id) {
+            if let Some(image) = warm_capture_latest_frame()? {
+                return Ok(image);
+            }
+        }
+
         let cg_rect = CGDisplayBounds(self.cg_direct_display_id);
 
         capture(

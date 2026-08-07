@@ -103,6 +103,29 @@ impl Monitor {
     }
 }
 
+// ============ 预热捕获流（Warm Capturer）============
+
+impl Monitor {
+    /// 启动（或切换到）常驻预热捕获流，持续把最新帧写入内存缓存。
+    /// `capture_image` 将优先读取该缓存（毫秒级），大幅降低截屏冷启动延迟。
+    ///
+    /// 同一时间只保留一块显示器的流；重复调用相同显示器时直接复用。
+    /// 返回 true 表示新建了流，false 表示复用已有流。
+    pub fn warm_capture_start(&self) -> XCapResult<bool> {
+        self.impl_monitor.warm_capture_start()
+    }
+
+    /// 停止并释放预热捕获流（长时间无截图时可调用以释放资源）。
+    pub fn warm_capture_stop(&self) -> XCapResult<()> {
+        self.impl_monitor.warm_capture_stop()
+    }
+
+    /// 读取预热流的最新一帧（未启动或尚无帧时返回 None）。
+    pub fn warm_capture_latest_frame(&self) -> XCapResult<Option<RgbaImage>> {
+        self.impl_monitor.warm_capture_latest_frame()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::XCapError;
