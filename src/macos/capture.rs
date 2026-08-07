@@ -1,27 +1,26 @@
 use image::RgbaImage;
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::{
-    CGDataProvider, CGImage, CGWindowID, CGWindowImageOption, CGWindowListCreateImage,
-    CGWindowListOption,
+    CGDataProvider, CGDirectDisplayID, CGDisplayCreateImage, CGDisplayCreateImageForRect,
+    CGImage, CGWindowID, CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption,
 };
 
 use crate::error::{XCapError, XCapResult};
 
-pub fn capture(
-    cg_rect: CGRect,
-    list_option: CGWindowListOption,
-    window_id: CGWindowID,
-    image_option: CGWindowImageOption,
-) -> XCapResult<RgbaImage> {
-    let cg_image = CGWindowListCreateImage(cg_rect, list_option, window_id, image_option);
-
-    let width = CGImage::width(cg_image.as_deref());
-    let height = CGImage::height(cg_image.as_deref());
-    let bytes_per_row = CGImage::bytes_per_row(cg_image.as_deref());
-    let data_provider = CGImage::data_provider(cg_image.as_deref());
+/// 将 CGImage 的像素数据转换为 RGBA RgbaImage。
+/// 兼容行尾 padding 的 BGRA/其它 32bit 布局（统一按 BGRA 处理并交换到 RGBA）。
+fn cg_image_to_rgba(cg_image: Option<&CGImage>) -> XCapResult<RgbaImage> {
+    let width = CGImage::width(cg_image);
+    let height = CGImage::height(cg_image);
+    let bytes_per_row = CGImage::bytes_per_row(cg_image);
+    let data_provider = CGImage::data_provider(cg_image);
 
     let data = CGDataProvider::data(data_provider.as_deref())
         .ok_or_else(|| XCapError::new("Failed to copy data"))?;
+
+    if width == 0 || height == 0 {
+        return Err(XCapError::new("Empty CGImage"));
+    }
 
     let len = width * height * 4;
     let mut buffer: Vec<u8> = Vec::with_capacity(len);
@@ -55,6 +54,39 @@ pub fn capture(
 
     RgbaImage::from_raw(width as u32, height as u32, buffer)
         .ok_or_else(|| XCapError::new("RgbaImage::from_raw failed"))
+}
+
+/// 截取指定窗口列表区域的合成画面（旧路径，保留给窗口截屏等场景）
+pub fn capture(
+    cg_rect: CGRect,
+    list_option: CGWindowListOption,
+    window_id: CGWindowID,
+    image_option: CGWindowImageOption,
+) -> XCapResult<RgbaImage> {
+    let cg_image = CGWindowListCreateImage(cg_rect, list_option, window_id, image_option);
+
+    cg_image_to_rgba(cg_image.as_deref())
+}
+
+/// 直接读取显示器的当前帧缓冲（快速截屏路径）。
+///
+/// 相比 `CGWindowListCreateImage`（需枚举窗口并合成，冷启动数百毫秒），
+/// `CGDisplayCreateImage` 直接抓取该显示器的当前画面（典型 20-80ms），
+/// 语义即为「调用瞬间的画面」，不含鼠标光标——符合截屏选区背景的需求。
+pub fn capture_display(display_id: CGDirectDisplayID) -> XCapResult<RgbaImage> {
+    let cg_image = CGDisplayCreateImage(display_id)
+        .ok_or_else(|| XCapError::new("CGDisplayCreateImage failed"))?;
+
+    cg_image_to_rgba(Some(cg_image.as_ref()))
+}
+
+/// 直接读取显示器指定区域的当前帧缓冲（快速截屏路径）。
+/// `rect` 需为显示器全局坐标系（同 CGDisplayBounds）。
+pub fn capture_display_rect(display_id: CGDirectDisplayID, rect: CGRect) -> XCapResult<RgbaImage> {
+    let cg_image = CGDisplayCreateImageForRect(display_id, rect)
+        .ok_or_else(|| XCapError::new("CGDisplayCreateImageForRect failed"))?;
+
+    cg_image_to_rgba(Some(cg_image.as_ref()))
 }
 
 /// Convert BGRA pixels to RGBA. Written with u32 lane ops so LLVM can
