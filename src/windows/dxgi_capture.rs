@@ -2,19 +2,20 @@
 //!
 //! 相比 GDI BitBlt（全屏 GetWindowDC + BitBlt + 逐行拷贝，4K 下 50ms+），
 //! DXGI 通过 `IDXGIOutputDuplication` 直接取 GPU 上的桌面帧，再 staging 拷贝
-//! 回 CPU，语义为「调用瞬间的画面」（建立 duplication 后首帧即当前桌面）。
+//! 回 CPU，语义为「调用瞬间的画面」。
 //!
 //! 单帧路径每次新建 duplication（简单可靠，无设备/热插拔状态管理）；
-//! `AcquireNextFrame` 取帧失败由调用方 fallback 到 GDI。
+//! 取帧失败由调用方 fallback 到 GDI。
 //!
-//! # `LastPresentTime == 0` 处理（单帧截屏最佳实践）
+//! # 新建 duplication 后的首帧语义
 //!
-//! 按 MSDN `DXGI_OUTDUPL_FRAME_INFO`：`LastPresentTime == 0` 表示自上次
-//! `AcquireNextFrame` 以来**桌面位图未发生新的 present**（常见于仅鼠标
-//! 形状/位置更新）。此时若仍返回了 `DesktopResource`，其中仍是当前完整
-//! 桌面纹理，单帧截屏应直接使用，而**不能**当作失败回退 GDI。
+//! 按 MSDN：`LastPresentTime == 0` 且 `AccumulatedFrames == 0` 表示本次仅有
+//! 鼠标形状/位置更新，**桌面位图未 present**。在**刚 DuplicateOutput** 时若直接
+//! 使用该帧的 `DesktopResource`，实测可能得到近乎空白纹理（LZ4 异常高压缩比）。
 //!
-//! 仅在超时或 `resource` 为空时重试；耗尽预算后再由上层 fallback。
+//! 因此单帧截屏必须等到一次真正的桌面 present：
+//! `LastPresentTime != 0` 或 `AccumulatedFrames > 0`，再 `texture_to_frame`。
+//! 指针-only / 超时则 Release 后重试；耗尽预算再交给上层 GDI。
 
 use windows::{
     Win32::{
@@ -39,9 +40,9 @@ use crate::{XCapError, XCapResult};
 
 use super::utils::{create_d3d_device, texture_to_frame};
 
-/// 单次 Acquire 超时（毫秒）。多轮合计约 1s，与旧实现总预算一致。
+/// 单次 Acquire 超时（毫秒）。多轮合计约 1s。
 const ACQUIRE_TIMEOUT_MS: u32 = 125;
-/// 超时 / 无 resource 时的最大重试次数。
+/// 超时 / 指针-only / 无 resource 时的最大重试次数。
 const ACQUIRE_MAX_ATTEMPTS: u32 = 8;
 
 /// 用 DXGI 抓取指定显示器的一帧（按 h_monitor 匹配 output）。
@@ -99,7 +100,13 @@ pub(super) fn capture_monitor(
     }
 }
 
-/// 等待并取回一帧。有有效 DesktopResource 即用于单帧截屏（含指针-only 更新）。
+/// 是否为可用的桌面 present 帧（非指针-only）。
+#[inline]
+fn is_desktop_present_frame(info: &DXGI_OUTDUPL_FRAME_INFO) -> bool {
+    info.LastPresentTime != 0 || info.AccumulatedFrames > 0
+}
+
+/// 等待真正的桌面 present 帧并取回像素。
 fn capture_one_frame(
     d3d_device: &ID3D11Device,
     d3d_context: &ID3D11DeviceContext,
@@ -117,36 +124,50 @@ fn capture_one_frame(
             match duplication.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut frame_info, &mut resource) {
                 Ok(()) => {}
                 Err(e) => {
-                    // 失败也要尝试 Release，避免 duplication 卡在 acquired 状态
                     let _ = duplication.ReleaseFrame();
                     if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                        log::debug!(
+                            "[xcap] DXGI AcquireNextFrame timeout (attempt={})",
+                            attempt
+                        );
                         continue;
                     }
                     return Err(XCapError::new(format!("AcquireNextFrame failed: {e:?}")));
                 }
             }
 
-            // 无纹理：多为指针元数据通知，必须 Release 后再 Acquire
+            // 新建 duplication 后常见首包为指针-only：必须丢弃并重试，否则可能读到空白纹理
+            if !is_desktop_present_frame(&frame_info) {
+                log::debug!(
+                    "[xcap] DXGI skip pointer-only frame (attempt={}, LastPresentTime=0, AccumulatedFrames={})",
+                    attempt,
+                    frame_info.AccumulatedFrames
+                );
+                let _ = duplication.ReleaseFrame();
+                continue;
+            }
+
             let Some(resource) = resource else {
+                log::debug!(
+                    "[xcap] DXGI present frame without resource (attempt={}), retry",
+                    attempt
+                );
                 let _ = duplication.ReleaseFrame();
                 continue;
             };
 
-            // LastPresentTime == 0：桌面位图相对「上次 Acquire」无新 present（常为鼠标更新），
-            // 但 resource 仍是当前桌面，单帧截屏直接用。
-            if frame_info.LastPresentTime == 0 {
-                log::debug!(
-                    "[xcap] DXGI pointer-only/no-new-present frame accepted for screenshot (attempt={})",
-                    attempt
-                );
-            }
+            log::debug!(
+                "[xcap] DXGI desktop present frame (attempt={}, AccumulatedFrames={}, LastPresentTime!=0={})",
+                attempt,
+                frame_info.AccumulatedFrames,
+                frame_info.LastPresentTime != 0
+            );
 
             let result = (|| -> XCapResult<RgbaImage> {
                 let source_texture = resource.cast::<ID3D11Texture2D>()?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 source_texture.GetDesc(&mut desc);
 
-                // 越界保护：请求区域超出桌面帧时收缩到帧内
                 let (x, y, width, height) = (
                     x.min(desc.Width),
                     y.min(desc.Height),
@@ -176,7 +197,7 @@ fn capture_one_frame(
         }
 
         Err(XCapError::new(
-            "DXGI acquire frame failed: no desktop resource after retries",
+            "DXGI acquire frame failed: no desktop present after retries",
         ))
     }
 }
