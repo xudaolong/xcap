@@ -79,12 +79,21 @@ pub(super) fn get_os_major_version() -> u8 {
 }
 
 pub(super) fn bgra_to_rgba(mut buffer: Vec<u8>) -> Vec<u8> {
-    let is_old_version = get_os_major_version() < 8;
-    for src in buffer.chunks_exact_mut(4) {
-        src.swap(0, 2);
-        // fix https://github.com/nashaofu/xcap/issues/92#issuecomment-1910014951
-        if src[3] == 0 && is_old_version {
-            src[3] = 255;
+    // 缓存大版本号，避免每次整屏转换都读注册表
+    static OS_MAJOR: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let is_old_version = *OS_MAJOR.get_or_init(get_os_major_version) < 8;
+    if is_old_version {
+        for src in buffer.chunks_exact_mut(4) {
+            src.swap(0, 2);
+            // fix https://github.com/nashaofu/xcap/issues/92#issuecomment-1910014951
+            if src[3] == 0 {
+                src[3] = 255;
+            }
+        }
+    } else {
+        // Win8+ 常见路径：只交换 R/B，无逐像素 alpha 分支
+        for src in buffer.chunks_exact_mut(4) {
+            src.swap(0, 2);
         }
     }
 
@@ -357,6 +366,7 @@ pub(super) fn texture_to_frame(
 
         d3d_context.Unmap(Some(&resource), 0);
 
-        Ok(Frame::new(width, height, bgra_to_rgba(bgra.to_owned())))
+        // 就地转换，禁止再 clone 一整份像素缓冲
+        Ok(Frame::new(width, height, bgra_to_rgba(bgra)))
     }
 }

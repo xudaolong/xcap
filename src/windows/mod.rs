@@ -1,7 +1,7 @@
 mod accessibility;
 mod capture;
 #[cfg(not(feature = "wgc"))]
-mod dxgi_capture;
+pub(crate) mod dxgi_capture;
 #[cfg(not(feature = "wgc"))]
 mod dxgi_video_recorder;
 #[cfg(not(feature = "wgc"))]
