@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::{
     CGDataProvider, CGDirectDisplayID, CGDisplayBounds, CGDisplayCreateImage,
-    CGDisplayCreateImageForRect, CGImage, CGWindowID, CGWindowImageOption,
+    CGDisplayCreateImageForRect, CGImage, CGMainDisplayID, CGWindowID, CGWindowImageOption,
     CGWindowListCreateImage, CGWindowListOption,
 };
 use objc2_foundation::NSError;
@@ -208,6 +208,21 @@ pub fn capture_display_rect(display_id: CGDirectDisplayID, rect: CGRect) -> XCap
         .ok_or_else(|| XCapError::new("CGDisplayCreateImageForRect failed"))?;
 
     cg_image_to_rgba(Some(cg_image.as_ref()))
+}
+
+/// 预热 macOS 捕获后端（应用启动时调用；内部起后台线程，不阻塞调用方）。
+///
+/// 一次性 `SCScreenshotManager.captureImageInRect:` 首次调用需初始化捕获管线，
+/// 实测首次 wait ~105ms，预热后降至 ~35ms。这里对主屏做一次抛弃式整屏截图并立即
+/// 丢弃图像；macOS < 14 自动走 CG 回退（同样完成预热），无权限/失败仅记 debug 日志。
+pub fn preheat_capture_backend() {
+    std::thread::spawn(|| {
+        let start = Instant::now();
+        match capture_display(CGMainDisplayID()) {
+            Ok(_) => log::info!("[xcap] macOS capture backend preheated: {:?}", start.elapsed()),
+            Err(e) => log::debug!("[xcap] macOS capture backend preheat skipped: {e}"),
+        }
+    });
 }
 
 /// Convert BGRA pixels to RGBA. Written with u32 lane ops so LLVM can
