@@ -151,7 +151,9 @@ fn capture_display_sck(display_id: CGDirectDisplayID) -> Option<RgbaImage> {
     }
 
     // 超时兜底：SCK 内部异常时不至于挂死，回退旧路径。
-    match rx.recv_timeout(Duration::from_millis(500)) {
+    // 阈值 150ms：SCK 正常路径实测 25~50ms，超此即可判定异常；
+    // CG 回退路径本身仅 ~76ms，500ms 等待会把最坏情况放大到 ~576ms。
+    match rx.recv_timeout(Duration::from_millis(150)) {
         Ok((Ok(image), convert_elapsed)) => {
             let total = call_start.elapsed();
             log::info!(
